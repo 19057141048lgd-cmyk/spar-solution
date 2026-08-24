@@ -1,0 +1,27 @@
+# 本地密钥与运行状态
+.env
+.env.*
+!.env.example
+config/test.env
+config/*.local
+
+# 本地运行产物和敏感响应
+artifacts/
+data/
+logs/
+*.jsonl
+*.log
+*.sqlite
+*.db
+
+# Python / Node 工具产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+node_modules/
+dist/
+build/
+
+# 临时任务原始抓取物
+.codex-tasks/*/raw/*

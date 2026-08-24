@@ -1,0 +1,13 @@
+id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes
+1,冻结 P2 规范和 Agent 测试隔离规则,DONE,SPEC 与任务真源完整且 P3 保持 TODO,Get-Content .codex-tasks/20260824-spar-integration/tasks/p2/SPEC.md,2026-08-24T18:10:00+08:00,0,
+2,实现 QueryPlan 与 QueryPlanner,DONE,自然语言问题转结构化子查询且 AutoScholar 问句不被全词 AND,python -m unittest spar_solution.tests.test_p2_query_plan -v,2026-08-24T18:35:00+08:00,0,含 gap 驱动下一轮语义子查询
+3,实现 SourceRouter 与并发 RecallRunner,DONE,按能力选源并显式记录调用预算和错误,python -m unittest spar_solution.tests.test_p2_recall -v,2026-08-24T18:35:00+08:00,0,有界并发和错误脱敏
+4,实现 ConstraintGate 与 EvidenceLoader,DONE,硬约束三态和证据状态可回溯,python -m unittest spar_solution.tests.test_p2_evidence -v,2026-08-24T18:35:00+08:00,0,证据文件由 artifact writer 实际落盘
+5,实现 CitationExpander,DONE,引用边带父论文关系来源深度且种子受门控,python -m unittest spar_solution.tests.test_p2_citation -v,2026-08-24T18:35:00+08:00,0,depth=1 且支持 citation_disabled 消融
+6,实现 Scorer 与 EvidenceVerdict,DONE,分量分和配置权重可解释且 Provider 错误不降分,python -m unittest spar_solution.tests.test_p2_scoring -v,2026-08-24T18:35:00+08:00,0,六分量与默认权重固定
+7,实现 StopController,DONE,强软停止输出 reason_code 和数值依据,python -m unittest spar_solution.tests.test_p2_stop -v,2026-08-24T18:35:00+08:00,0,预算/迭代/覆盖率停止规则
+8,实现 P2 Pipeline 和 artifact 回放,DONE,两轮有界流程可生成完整结构化运行目录,python -m unittest spar_solution.tests.test_p2_pipeline -v,2026-08-24T18:35:00+08:00,0,replay 校验 QueryPlan PaperDoc manifest 和 evidence_ref
+9,补充 P2 指标与引用消融,DONE,含 MRR 引用覆盖证据覆盖及引用开关对照,python -m unittest spar_solution.tests.test_p2_metrics -v,2026-08-24T18:35:00+08:00,0,证据覆盖按论文去重
+10,执行 P2 mock 自测与 AutoScholar 小样本,DONE,无 Key 可运行并保存结果和限制说明,python -m spar_solution.src.spar_baseline.p2_cli fixture --output spar_solution/artifacts/p2/self-test,2026-08-24T18:35:00+08:00,0,enabled/disabled fixture 与前20条 AutoScholar 回归通过
+11,全新 Agent 独立验收,DONE,未参与开发的 Agent 只读测试并给出问题清单,python -m unittest discover -s spar_solution/tests -v,2026-08-24T18:35:00+08:00,0,全新只读 Agent PASS；94 tests
+12,完成 P2 Git 版本,DONE,全量测试和安全检查通过且 Git 提交可定位,git status --short,2026-08-24T18:35:00+08:00,0,提交在所有 staged 检查通过后创建

@@ -1,0 +1,122 @@
+[
+  {
+    "calls": [
+      {
+        "depth": 1,
+        "latency_ms": 0.151,
+        "ok": true,
+        "paper_id": "fixture:seed",
+        "records": 1,
+        "relation": "all",
+        "source": "arxiv"
+      }
+    ],
+    "edges": [
+      {
+        "child_paper_id": "fixture:child",
+        "depth": 1,
+        "parent_paper_id": "fixture:seed",
+        "relation_type": "references",
+        "source": "arxiv"
+      }
+    ],
+    "papers": [
+      {
+        "access": {
+          "content_type": "abstract",
+          "full_text_status": "abstract",
+          "landing_url": "https://example.invalid/paper",
+          "oa_url": null,
+          "pdf_url": null
+        },
+        "bibliography": {
+          "abstract": "Reference paper on WiFi CSI heart rate measurement.",
+          "authors": [
+            "Ada Lovelace"
+          ],
+          "fields": [
+            "computer science"
+          ],
+          "title": "Mock scientific retrieval paper",
+          "venue": "Mock Venue",
+          "year": 2025
+        },
+        "content": {
+          "char_count": 51,
+          "chunks": [],
+          "content_ref": null,
+          "sections": []
+        },
+        "evidence_refs": [],
+        "identifiers": {
+          "arxiv_id": null,
+          "doi": "10.1234/fixture.child",
+          "openalex_id": null,
+          "pmcid": null,
+          "pmid": null,
+          "s2_id": null,
+          "sciverse_doc_id": null,
+          "unique_id": null
+        },
+        "paper_id": "fixture:child",
+        "provenance": {
+          "citation_depth": 1,
+          "endpoints": [
+            "mock://arxiv/search"
+          ],
+          "execution_status": "mock",
+          "iteration": 0,
+          "pages": [
+            1
+          ],
+          "parent_node_id": "fixture:seed",
+          "query_id": "qplan_fa7a58db8602",
+          "reconciliation": {
+            "complete": true
+          },
+          "retrieved_at": "2026-08-24T00:00:00Z",
+          "sources": [
+            "arxiv"
+          ],
+          "subquery_id": "mock-subquery",
+          "warnings": []
+        },
+        "relation_type": "references",
+        "relations": {
+          "citations": [],
+          "references": [],
+          "related_works": []
+        },
+        "schema_version": "paperdoc.v1",
+        "scores": {
+          "citation": null,
+          "confidence": null,
+          "constraint": null,
+          "evidence": null,
+          "final": null,
+          "novelty": null,
+          "quality": null,
+          "relevance": null,
+          "retrieval": 0.8
+        },
+        "status": {
+          "evidence_status": "abstract",
+          "hard_constraints_pass": null,
+          "provider_errors": []
+        }
+      }
+    ],
+    "source_errors": [],
+    "stats": {
+      "ablation": null,
+      "api_calls": 1,
+      "edges": 1,
+      "eligible_seeds": 1,
+      "enabled": true,
+      "iteration": 0,
+      "max_depth": 1,
+      "papers": 1,
+      "source_errors": 0
+    }
+  }
+]

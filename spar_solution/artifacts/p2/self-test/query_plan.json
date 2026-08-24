@@ -1,0 +1,61 @@
+{
+  "budget": {
+    "max_citation_depth": 1,
+    "max_iterations": 2,
+    "max_provider_calls": 20,
+    "max_subqueries_per_gap": 2
+  },
+  "datasets": [],
+  "gaps": [
+    "missing_method",
+    "missing_dataset",
+    "missing_time_range",
+    "missing_application"
+  ],
+  "hard_constraints": [],
+  "history_size": 0,
+  "methods": [],
+  "query_id": "qplan_fa7a58db8602",
+  "raw_query": "WiFi heart rate monitoring",
+  "schema_version": "query_plan.v1",
+  "soft_constraints": [
+    {
+      "name": "evidence",
+      "operator": "prefer",
+      "value": "abstract_or_fulltext"
+    }
+  ],
+  "source_capabilities": [
+    "arxiv",
+    "openalex",
+    "local_library"
+  ],
+  "stop_strategy": {
+    "min_evidence_coverage": 0.7,
+    "min_new_relevant": 2,
+    "min_subquery_coverage": 0.8
+  },
+  "subqueries": [
+    {
+      "iteration": 0,
+      "kind": "topic",
+      "parent_id": null,
+      "query_text": "wifi heart rate monitoring",
+      "source_capabilities": [
+        "arxiv",
+        "openalex",
+        "local_library"
+      ],
+      "subquery_id": "sq_topic_01"
+    }
+  ],
+  "tasks": [
+    "heart rate monitoring"
+  ],
+  "time_range": {
+    "end_year": null,
+    "source": "unspecified",
+    "start_year": null
+  },
+  "topic": "wifi heart rate monitoring"
+}

@@ -1,0 +1,18 @@
+id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes
+1,冻结 PaperDoc 字段并实现校验器,DONE,PaperDoc 必填字段枚举和数组约束可执行,python -m unittest spar_solution.tests.test_paperdoc -v,2026-08-24T15:45:00+08:00,0,4 个定向测试通过
+2,实现跨源去重合并和 Provider 错误事件,DONE,相同 DOI 合并且错误不降为低分,python -m unittest spar_solution.tests.test_mock_pipeline -v,2026-08-24T15:45:00+08:00,0,错误保存在 status.provider_errors
+3,运行 P1 mock 闭环并记录验收,DONE,全量定向测试通过且无真实 Key 访问,python -m unittest discover -s spar_solution/tests -v,2026-08-24T15:46:00+08:00,0,基础 mock 闭环通过
+4,实现本地配置读取和 Provider contract,DONE,密钥只从未跟踪文件读取且错误类型固定,python -m unittest spar_solution.tests.test_config spar_solution.tests.test_provider_contract -v,2026-08-24T16:00:00+08:00,0,.env.local 被 .gitignore 忽略
+5,实现 Bohrium 检索与全文适配,DONE,Bohrium 响应可映射 PaperDoc 且业务错误显式,python -m unittest spar_solution.tests.test_bohrium_provider -v,2026-08-24T16:00:00+08:00,0,真实运行因 BOHR_ACCESS_KEY 缺失显式 config
+6,实现 OpenAlex 检索适配,DONE,OpenAlex works 可映射 PaperDoc 且分页参数受控,python -m unittest spar_solution.tests.test_openalex_provider -v,2026-08-24T16:00:00+08:00,0,真实 API 返回 5 条
+7,实现跨源检索编排和 JSON artifact,DONE,双源结果去重合并并保留 source_errors,python -m unittest spar_solution.tests.test_search_service -v,2026-08-24T16:00:00+08:00,0,live artifact 保存
+8,处理 SPAR P1 已知兼容问题,DONE,已知确定性错误有代码修复或可执行隔离说明,python -m unittest spar_solution.tests.test_spar_compat -v,2026-08-24T16:00:00+08:00,0,未修改 repos/SPAR
+9,执行 WiFi 心率监测真实检索,DONE,至少一个来源返回可解析结果并保存脱敏 artifact,python -m spar_solution.src.spar_baseline.cli search --query "WiFi heart rate monitoring" --providers bohrium openalex --live --page-size 5 --output spar_solution/artifacts/p1/wifi-heart-rate-live-local-env.json,2026-08-24T16:00:00+08:00,0,OpenAlex 返回 5 条；Bohrium config 缺失
+10,完成 P1 全量验收和日志,DONE,单测、编译、secret scan、live artifact 与验收报告完成,python -m unittest discover -s spar_solution/tests -v,2026-08-24T16:00:00+08:00,0,基础 P1 已验收，评测协议后续补充
+11,冻结论文身份匹配和 ambiguous 规则,DONE,DOI/arXiv/稳定ID/标题年份首作者优先级可执行且无法确认不算 TP,python -m unittest spar_solution.tests.test_identity -v,2026-08-24T17:20:00+08:00,0,身份匹配和 ambiguous 已测试
+12,实现 Gold 协议和 provisional WiFi 标注集,DONE,四个查询及标注来源状态时间依据可校验且不声称官方,python -m unittest spar_solution.tests.test_gold -v,2026-08-24T17:20:00+08:00,0,provisional 非官方 Gold
+13,实现 Precision Recall F1 Macro Micro 和运行统计,DONE,@10/@20 空集合安全规则和汇总指标有测试,python -m unittest spar_solution.tests.test_evaluation -v,2026-08-24T17:20:00+08:00,0,含运行统计和空集合安全规则
+14,实现 arXiv 和 LocalLibrary Provider,DONE,arXiv 及 fixture/mock/configured/unavailable 本地库状态可执行,python -m unittest spar_solution.tests.test_arxiv_provider spar_solution.tests.test_local_library_provider -v,2026-08-24T17:20:00+08:00,0,本地库无路径时 config_missing
+15,实现 A B C D 四模式实验与回归判断,DONE,四模式先去重后计分并输出 fusion_regression/rerank_regression,python -m unittest spar_solution.tests.test_experiment -v,2026-08-24T17:20:00+08:00,0,P1 确定性排序
+16,执行 WiFi 四查询 fixture 评测并保存完整 artifacts,DONE,每查询目录含九类指定文件且无 Provider 错误被计为不相关,python -m spar_solution.src.spar_baseline.eval_cli wifi-fixture --output spar_solution/artifacts/p1/wifi-heart-rate,2026-08-24T17:20:00+08:00,0,四查询 A/B/C/D fixture 已生成
+17,完成 P1 评测协议全量复验,DONE,全量测试编译secret scan git diff check和验收报告通过,python -m unittest discover -s spar_solution/tests -v,2026-08-24T17:40:00+08:00,0,60 tests；compileall；artifact；secret scan 通过

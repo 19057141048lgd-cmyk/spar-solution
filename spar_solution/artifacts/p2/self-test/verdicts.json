@@ -1,0 +1,62 @@
+[
+  {
+    "component_scores": {
+      "citation": 0.0,
+      "constraint": 1.0,
+      "evidence": 0.55,
+      "novelty": 0.5,
+      "quality": 1.0,
+      "relevance": 1.0
+    },
+    "confidence": 0.85,
+    "constraint_state": "pass",
+    "evidence_refs": [
+      "evidence/fixture_seed/fixture_seed_abstract.txt"
+    ],
+    "evidence_status": "abstract",
+    "excluded": false,
+    "final_score": 0.785,
+    "iteration": 0,
+    "paper_id": "fixture:seed",
+    "reason_codes": [],
+    "warnings": [],
+    "weights": {
+      "citation": 0.1,
+      "constraint": 0.25,
+      "evidence": 0.2,
+      "novelty": 0.05,
+      "quality": 0.1,
+      "relevance": 0.3
+    }
+  },
+  {
+    "component_scores": {
+      "citation": 0.0,
+      "constraint": 1.0,
+      "evidence": 0.55,
+      "novelty": 0.5,
+      "quality": 1.0,
+      "relevance": 0.75
+    },
+    "confidence": 0.766667,
+    "constraint_state": "pass",
+    "evidence_refs": [
+      "evidence/fixture_child/fixture_child_abstract.txt"
+    ],
+    "evidence_status": "abstract",
+    "excluded": false,
+    "final_score": 0.71,
+    "iteration": 0,
+    "paper_id": "fixture:child",
+    "reason_codes": [],
+    "warnings": [],
+    "weights": {
+      "citation": 0.1,
+      "constraint": 0.25,
+      "evidence": 0.2,
+      "novelty": 0.05,
+      "quality": 0.1,
+      "relevance": 0.3
+    }
+  }
+]

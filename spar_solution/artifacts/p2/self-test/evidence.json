@@ -1,0 +1,32 @@
+[
+  {
+    "char_count": 83,
+    "confidence": 0.55,
+    "content_ref": null,
+    "evidence_id": "fixture:seed:abstract",
+    "evidence_ref": "evidence/fixture_seed/fixture_seed_abstract.txt",
+    "evidence_status": "abstract",
+    "iteration": 0,
+    "offset": null,
+    "page": null,
+    "paper_id": "fixture:seed",
+    "section": null,
+    "source": "arxiv",
+    "unavailable_reason": null
+  },
+  {
+    "char_count": 51,
+    "confidence": 0.55,
+    "content_ref": null,
+    "evidence_id": "fixture:child:abstract",
+    "evidence_ref": "evidence/fixture_child/fixture_child_abstract.txt",
+    "evidence_status": "abstract",
+    "iteration": 0,
+    "offset": null,
+    "page": null,
+    "paper_id": "fixture:child",
+    "section": null,
+    "source": "arxiv",
+    "unavailable_reason": null
+  }
+]

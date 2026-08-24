@@ -1,0 +1,34 @@
+[
+  {
+    "decision_type": "soft",
+    "measurements": {
+      "budget_exhausted": false,
+      "citation_depth": 0,
+      "evidence_coverage": 1.0,
+      "iteration": 0,
+      "new_relevant_papers": 1,
+      "new_unique_papers": [
+        1
+      ],
+      "provider_calls": 1,
+      "provider_successes": 1,
+      "subquery_coverage": 1.0
+    },
+    "reason_code": "LOW_GAIN_SUFFICIENT_COVERAGE",
+    "should_stop": true,
+    "thresholds": {
+      "max_citation_depth": 1,
+      "max_iterations": 2,
+      "max_provider_calls": 20,
+      "min_evidence_coverage": 0.7,
+      "min_new_relevant": 2,
+      "min_subquery_coverage": 0.8,
+      "soft_conditions_required": 2
+    },
+    "triggered_conditions": [
+      "LOW_RELEVANT_GAIN",
+      "SUBQUERY_COVERAGE_MET",
+      "EVIDENCE_COVERAGE_MET"
+    ]
+  }
+]

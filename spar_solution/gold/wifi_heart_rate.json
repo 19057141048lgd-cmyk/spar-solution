@@ -1,0 +1,146 @@
+{
+  "schema_version": "spar.gold.v1",
+  "dataset_id": "wifi_heart_rate_provisional_v1",
+  "annotation_source": "manual_review_of_openalex_metadata_and_abstracts",
+  "annotation_status": "provisional",
+  "annotated_at": "2026-08-24T17:00:00+08:00",
+  "notes": "Small manually reviewed fixture for P1 protocol validation. It is not an official or exhaustive Gold set and cannot prove retrieval improvement.",
+  "queries": [
+    {
+      "query_id": "wifi_hr_q1",
+      "query": "WiFi heart rate monitoring",
+      "annotation_source": "manual_review_of_openalex_metadata_and_abstracts",
+      "annotation_status": "provisional",
+      "annotated_at": "2026-08-24T17:00:00+08:00",
+      "notes": "Direct topic query; relevance judged from title and abstract.",
+      "relevant_papers": [
+        {
+          "paper_id": "doi:10.1109/globecom38437.2019.9014297",
+          "identifiers": {"doi": "10.1109/globecom38437.2019.9014297", "openalex_id": "W3009125834"},
+          "title": "WiFi-Based Real-Time Breathing and Heart Rate Monitoring during Sleep",
+          "year": 2019,
+          "first_author": "Yu Gu",
+          "judgment_basis": "Title and abstract explicitly describe contactless WiFi heart-rate monitoring."
+        },
+        {
+          "paper_id": "doi:10.1109/ccnc.2018.8319181",
+          "identifiers": {"doi": "10.1109/ccnc.2018.8319181", "openalex_id": "W2791489307"},
+          "title": "Design and implementation of monitoring system for breathing and heart rate pattern using WiFi signals",
+          "year": 2018,
+          "first_author": "Sangyoun Lee",
+          "judgment_basis": "Title and abstract explicitly measure heart-rate patterns using WiFi signals."
+        },
+        {
+          "paper_id": "doi:10.1145/2746285.2746303",
+          "identifiers": {"doi": "10.1145/2746285.2746303", "openalex_id": "W1977986674"},
+          "title": "Tracking Vital Signs During Sleep Leveraging Off-the-shelf WiFi",
+          "year": 2015,
+          "first_author": "Jian Liu",
+          "judgment_basis": "Abstract explicitly estimates breathing and heart rates from WiFi channel information."
+        }
+      ]
+    },
+    {
+      "query_id": "wifi_hr_q2",
+      "query": "WiFi-based heart rate measurement",
+      "annotation_source": "manual_review_of_openalex_metadata_and_abstracts",
+      "annotation_status": "provisional",
+      "annotated_at": "2026-08-24T17:00:00+08:00",
+      "notes": "Measurement wording variant; relevance judged from title and abstract.",
+      "relevant_papers": [
+        {
+          "paper_id": "doi:10.1109/globecom38437.2019.9014297",
+          "identifiers": {"doi": "10.1109/globecom38437.2019.9014297", "openalex_id": "W3009125834"},
+          "title": "WiFi-Based Real-Time Breathing and Heart Rate Monitoring during Sleep",
+          "year": 2019,
+          "first_author": "Yu Gu",
+          "judgment_basis": "Abstract reports real-time heart-rate detection using WiFi devices."
+        },
+        {
+          "paper_id": "doi:10.1109/ccnc.2018.8319181",
+          "identifiers": {"doi": "10.1109/ccnc.2018.8319181", "openalex_id": "W2791489307"},
+          "title": "Design and implementation of monitoring system for breathing and heart rate pattern using WiFi signals",
+          "year": 2018,
+          "first_author": "Sangyoun Lee",
+          "judgment_basis": "The work measures changes in heart-rate patterns with commercial WiFi devices."
+        },
+        {
+          "paper_id": "doi:10.1109/jiot.2018.2822818",
+          "identifiers": {"doi": "10.1109/jiot.2018.2822818", "openalex_id": "W2796314695"},
+          "title": "Monitoring Vital Signs and Postures During Sleep Using WiFi Signals",
+          "year": 2018,
+          "first_author": "Jian Liu",
+          "judgment_basis": "Abstract explicitly estimates heart rate from off-the-shelf WiFi channel information."
+        }
+      ]
+    },
+    {
+      "query_id": "wifi_hr_q3",
+      "query": "contactless heart rate monitoring using WiFi",
+      "annotation_source": "manual_review_of_openalex_metadata_and_abstracts",
+      "annotation_status": "provisional",
+      "annotated_at": "2026-08-24T17:00:00+08:00",
+      "notes": "Contactless constraint included; relevance judged from title and abstract.",
+      "relevant_papers": [
+        {
+          "paper_id": "doi:10.1109/globecom38437.2019.9014297",
+          "identifiers": {"doi": "10.1109/globecom38437.2019.9014297", "openalex_id": "W3009125834"},
+          "title": "WiFi-Based Real-Time Breathing and Heart Rate Monitoring during Sleep",
+          "year": 2019,
+          "first_author": "Yu Gu",
+          "judgment_basis": "Abstract explicitly labels the WiFi vital-sign method contactless."
+        },
+        {
+          "paper_id": "doi:10.1145/2746285.2746303",
+          "identifiers": {"doi": "10.1145/2746285.2746303", "openalex_id": "W1977986674"},
+          "title": "Tracking Vital Signs During Sleep Leveraging Off-the-shelf WiFi",
+          "year": 2015,
+          "first_author": "Jian Liu",
+          "judgment_basis": "The method uses existing WiFi without wearable or dedicated devices to track heart rate."
+        },
+        {
+          "paper_id": "doi:10.1109/jiot.2018.2822818",
+          "identifiers": {"doi": "10.1109/jiot.2018.2822818", "openalex_id": "W2796314695"},
+          "title": "Monitoring Vital Signs and Postures During Sleep Using WiFi Signals",
+          "year": 2018,
+          "first_author": "Jian Liu",
+          "judgment_basis": "Abstract describes noninvasive heart-rate monitoring without wearable devices."
+        }
+      ]
+    },
+    {
+      "query_id": "wifi_hr_q4",
+      "query": "WiFi CSI vital signs heart rate",
+      "annotation_source": "manual_review_of_openalex_metadata_and_abstracts",
+      "annotation_status": "provisional",
+      "annotated_at": "2026-08-24T17:00:00+08:00",
+      "notes": "CSI/channel-information query variant; relevance judged from title and abstract.",
+      "relevant_papers": [
+        {
+          "paper_id": "doi:10.1145/2746285.2746303",
+          "identifiers": {"doi": "10.1145/2746285.2746303", "openalex_id": "W1977986674"},
+          "title": "Tracking Vital Signs During Sleep Leveraging Off-the-shelf WiFi",
+          "year": 2015,
+          "first_author": "Jian Liu",
+          "judgment_basis": "Abstract explicitly uses fine-grained WiFi channel information for breathing and heart rate."
+        },
+        {
+          "paper_id": "doi:10.1109/jiot.2018.2822818",
+          "identifiers": {"doi": "10.1109/jiot.2018.2822818", "openalex_id": "W2796314695"},
+          "title": "Monitoring Vital Signs and Postures During Sleep Using WiFi Signals",
+          "year": 2018,
+          "first_author": "Jian Liu",
+          "judgment_basis": "Abstract estimates heart rate using fine-grained WiFi channel information."
+        },
+        {
+          "paper_id": "doi:10.1109/globecom38437.2019.9014297",
+          "identifiers": {"doi": "10.1109/globecom38437.2019.9014297", "openalex_id": "W3009125834"},
+          "title": "WiFi-Based Real-Time Breathing and Heart Rate Monitoring during Sleep",
+          "year": 2019,
+          "first_author": "Yu Gu",
+          "judgment_basis": "Abstract directly covers WiFi-based vital-sign and heart-rate monitoring."
+        }
+      ]
+    }
+  ]
+}

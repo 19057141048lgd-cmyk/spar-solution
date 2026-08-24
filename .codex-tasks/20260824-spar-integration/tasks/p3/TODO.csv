@@ -1,0 +1,2 @@
+id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes
+1,等待 P2 完成,TODO,P2 Git 版本和独立验收完成,echo SKIP,,0,不得提前执行

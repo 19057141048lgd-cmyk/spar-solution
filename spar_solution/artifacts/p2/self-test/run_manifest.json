@@ -1,0 +1,13 @@
+{
+  "citation_enabled": true,
+  "evidence_files": [
+    "evidence/fixture_child/fixture_child_abstract.txt",
+    "evidence/fixture_seed/fixture_seed_abstract.txt"
+  ],
+  "generated_at": "2026-08-24T11:06:12.575015+00:00",
+  "iterations": 1,
+  "query": "WiFi heart rate monitoring",
+  "query_id": "qplan_fa7a58db8602",
+  "schema_version": "p2_run.v1",
+  "status": "ok"
+}
