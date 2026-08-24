@@ -178,6 +178,8 @@ class P3Pipeline:
             return {}, 0, skipped
         try:
             output = self.understanding_layer.judge(plan, candidates)
+            for issue in getattr(self.understanding_layer, "last_judge_issues", []):
+                errors.append({"source": "deepseek", "stage": "judge", "code": "judge_partial", "message": str(issue)[:200]})
             return {str(item["paper_id"]): item for item in output}, 1, skipped
         except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
             errors.append(_safe_error("deepseek", exc, stage="judge"))
@@ -192,6 +194,8 @@ class P3Pipeline:
             return 0, conflicts, []
         try:
             reviewed = self.understanding_layer.judge(plan, [prepared[item][0] for item in conflicts]) if self.understanding_layer is not None else []
+            for issue in getattr(self.understanding_layer, "last_judge_issues", []):
+                errors.append({"source": "deepseek", "stage": "arbiter_review", "code": "judge_partial", "message": str(issue)[:200]})
             for item in reviewed:
                 judgements[str(item["paper_id"])] = item
             reviewed_ids = [str(item["paper_id"]) for item in reviewed]

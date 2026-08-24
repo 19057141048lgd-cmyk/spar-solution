@@ -12,6 +12,7 @@ from spar_solution.src.spar_baseline.deepseek_layer import (
 )
 from spar_solution.src.spar_baseline.mock_pipeline import _paper
 from spar_solution.src.spar_baseline.query_plan import validate_query_plan
+from spar_solution.src.spar_baseline.query_planner import QueryPlanner
 
 
 def _envelope(content):
@@ -120,28 +121,116 @@ class DeepSeekLayerTests(unittest.TestCase):
         self.assertEqual(results[0]["hard_constraint_state"], "pass")
         self.assertEqual(results[1]["hard_constraint_state"], "unknown")
 
-    def test_judgement_rejects_missing_or_duplicate_candidate(self):
+    def test_judgement_drops_unknown_candidate_with_issue(self):
         paper = _paper("arxiv", "WiFi heart rate")
         paper["paper_id"] = "arxiv:1234.0001"
         invalid = {"schema_version": DEEPSEEK_JUDGEMENT_SCHEMA, "results": [{"paper_id": "wrong", "relevance_score": 1, "relevance_label": "relevant", "hard_constraint_state": "pass", "reason": "x", "evidence_needed": [], "confidence": 1}]}
         transport = FakeTransport([_plan_response(), invalid])
         layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=transport))
-        with self.assertRaises(DeepSeekSchemaError):
-            layer.judge(layer.plan("WiFi heart rate"), [paper])
+        results = layer.judge(layer.plan("WiFi heart rate"), [paper])
+        self.assertEqual(results, [])
+        self.assertTrue(any("unknown_paper_id" in issue for issue in layer.last_judge_issues))
 
-    def test_judgement_rejects_missing_candidate_and_invalid_score(self):
+    def test_judgement_partially_accepts_and_retries_missing_candidate(self):
         first = _paper("arxiv", "WiFi heart rate")
         first["paper_id"] = "arxiv:one"
         second = _paper("arxiv", "WiFi pulse")
         second["paper_id"] = "arxiv:two"
         missing = {"results": [{"paper_id": first["paper_id"], "relevance_score": 0.8}]}
-        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([_plan_response(), missing])))
-        with self.assertRaises(DeepSeekSchemaError):
-            layer.judge(layer.plan("WiFi heart rate"), [first, second])
-        invalid = {"results": [{"paper_id": first["paper_id"], "relevance_score": "bad", "relevance_label": "nonsense"}]}
-        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([_plan_response(), invalid])))
-        with self.assertRaises(DeepSeekSchemaError):
-            layer.judge(layer.plan("WiFi heart rate"), [first])
+        # 第二次调用（重试缺失候选）返回空对象 → 单篇放弃，第一条保留。
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([_plan_response(), missing, {}])))
+        results = layer.judge(layer.plan("WiFi heart rate"), [first, second])
+        self.assertEqual([item["paper_id"] for item in results], [first["paper_id"]])
+        self.assertTrue(any("arxiv:two" in issue for issue in layer.last_judge_issues))
+
+    def test_judgement_coerces_freeform_label_and_state(self):
+        first = _paper("arxiv", "WiFi heart rate")
+        first["paper_id"] = "arxiv:one"
+        lenient = {"results": [{"paper_id": first["paper_id"], "relevance_score": "bad", "relevance_label": "nonsense", "hard_constraint_state": "partially"}]}
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([_plan_response(), lenient])))
+        results = layer.judge(layer.plan("WiFi heart rate"), [first])
+        # 分数是唯一必需信号：坏分数兜底 0.5，自由文本标签/状态按保守值折算。
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["relevance_score"], 0.5)
+        self.assertEqual(results[0]["relevance_label"], "borderline")
+        self.assertEqual(results[0]["hard_constraint_state"], "unknown")
+
+    def test_judgement_drops_item_without_score(self):
+        first = _paper("arxiv", "WiFi heart rate")
+        first["paper_id"] = "arxiv:one"
+        no_score = {"results": [{"paper_id": first["paper_id"], "relevance_label": "relevant"}]}
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([_plan_response(), no_score, {}])))
+        results = layer.judge(layer.plan("WiFi heart rate"), [first])
+        self.assertEqual(results, [])
+        self.assertTrue(any("invalid_item" in issue for issue in layer.last_judge_issues))
+
+    def test_judgement_retries_with_halved_batch_on_total_failure(self):
+        papers = []
+        for index in range(4):
+            paper = _paper("arxiv", f"WiFi heart rate study {index}")
+            paper["paper_id"] = f"arxiv:paper{index}"
+            papers.append(paper)
+        # 首批 4 篇全部无效 → 减半为 2+2 重试；第二批 2 篇正常返回。
+        good = {"results": [
+            {"paper_id": "arxiv:paper0", "relevance_score": 0.9, "reason": "direct"},
+            {"paper_id": "arxiv:paper1", "relevance_score": 0.1, "reason": "off topic"},
+        ]}
+        transport = FakeTransport([_plan_response(), {"results": []}, good, {}])
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=transport))
+        results = layer.judge(layer.plan("WiFi heart rate"), papers)
+        self.assertEqual([item["paper_id"] for item in results], ["arxiv:paper0", "arxiv:paper1"])
+        # 至少发生了减半重试：总请求数 > 单批直接成功的情况。
+        self.assertGreaterEqual(len(transport.calls), 3)
+
+    def test_judgement_output_budget_scales_with_batch_size(self):
+        papers = []
+        for index in range(3):
+            paper = _paper("arxiv", f"WiFi heart rate study {index}")
+            paper["paper_id"] = f"arxiv:paper{index}"
+            papers.append(paper)
+        ok = {"results": [{"paper_id": f"arxiv:paper{i}", "relevance_score": 0.5} for i in range(3)]}
+        transport = FakeTransport([_plan_response(), ok])
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=transport))
+        layer.judge(layer.plan("WiFi heart rate"), papers)
+        body = json.loads(transport.calls[-1][3])
+        self.assertEqual(body["max_tokens"], min(8000, 150 * 3 + 400))
+
+    def test_judgement_stops_on_llm_budget_exhaustion(self):
+        paper = _paper("arxiv", "WiFi heart rate")
+        paper["paper_id"] = "arxiv:1234.0001"
+
+        class RateLimitTransport:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, method, url, headers, body, timeout):
+                self.calls += 1
+                return TransportResponse(429, json.dumps({"error": {"message": "rate limited"}}))
+
+        client = DeepSeekClient(api_key="k", transport=RateLimitTransport())
+        client.reset_usage(max_calls=1)
+        layer = DeepSeekUnderstandingLayer(client)
+        plan = QueryPlanner().plan("WiFi heart rate")
+        results = layer.judge(plan, [paper])
+        self.assertEqual(results, [])
+        self.assertTrue(any("budget_exhausted" in issue for issue in layer.last_judge_issues))
+
+
+    def test_plan_tolerates_malformed_constraint_and_list_elements(self):
+        # 真实失败案例：一条 name 为空的硬约束曾把整个计划打回规则规划器。
+        plan_response = dict(_plan_response())
+        plan_response["hard_constraints"] = [
+            {"name": "", "operator": "between", "value": "2018-"},
+            {"name": "time_range", "operator": "between", "value": "2018-2021"},
+            "not-an-object",
+        ]
+        plan_response["keywords"] = ["foundation models", "", 42, "NLP"]
+        plan_response["gaps"] = ["missing_dataset", "made_up_gap"]
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([plan_response])))
+        plan = layer.plan("foundation models for NLP")
+        self.assertEqual(plan["hard_constraints"], [{"name": "time_range", "operator": "between", "value": "2018-2021"}])
+        self.assertEqual(plan["keywords"], ["foundation models", "NLP"])
+        self.assertEqual(plan["gaps"], ["missing_dataset"])
 
     def test_missing_key_is_explicit_and_does_not_leak_secret(self):
         secret = "sk-test-not-to-leak-123456789"

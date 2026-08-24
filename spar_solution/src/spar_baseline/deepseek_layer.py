@@ -157,17 +157,30 @@ def _years(value: Any) -> dict[str, int | None]:
 
 
 def _constraints(value: Any, path: str) -> list[dict[str, str]]:
-    if not isinstance(value, list) or len(value) > 24:
-        raise DeepSeekSchemaError(f"{path} must be an array")
+    """解析约束列表；单条畸形约束跳过，不拖垮整个计划。
+
+    真实运行中模型偶尔产出 name 为空或类型错误的约束；旧逻辑整计划拒绝并
+    回退规则规划器，导致整轮检索质量下降（见 live-benchmark-q4-fixed-v2）。
+    """
+
+    if not isinstance(value, list):
+        return []
     result: list[dict[str, str]] = []
-    for index, item in enumerate(value):
+    for item in value:
         if not isinstance(item, Mapping):
-            raise DeepSeekSchemaError(f"{path}[{index}] must be an object")
-        result.append({
-            "name": _required_string(item.get("name"), f"{path}[{index}].name", max_length=100),
-            "operator": _required_string(item.get("operator"), f"{path}[{index}].operator", max_length=40),
-            "value": _required_string(item.get("value"), f"{path}[{index}].value", max_length=500),
-        })
+            continue
+        name = item.get("name")
+        operator = item.get("operator")
+        constraint_value = item.get("value")
+        if (
+            not isinstance(name, str) or not name.strip()
+            or not isinstance(operator, str) or not operator.strip()
+            or not isinstance(constraint_value, str) or not constraint_value.strip()
+        ):
+            continue
+        result.append({"name": name.strip()[:100], "operator": operator.strip()[:40], "value": constraint_value.strip()[:500]})
+        if len(result) >= 24:
+            break
     return result
 
 
@@ -181,6 +194,14 @@ def _source_list(value: Any, path: str) -> list[str]:
     return list(dict.fromkeys(accepted))
 
 
+def _string_list_tolerant(value: Any, *, max_items: int = 32) -> list[str]:
+    """列表元素级宽容解析：坏元素过滤，不整列表拒绝。"""
+
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()][:max_items]
+
+
 def _plan_payload(raw_query: str, response: Mapping[str, Any], *, history: Sequence[Mapping[str, Any]] | None = None) -> QueryPlan:
     # DeepSeek 有时会遵守任务语义但省略 schema_version 和空字段。允许安全
     # 补全这些非事实字段，保留 PaperDoc/来源/ID 等关键边界，避免整个流程无效降级。
@@ -191,19 +212,22 @@ def _plan_payload(raw_query: str, response: Mapping[str, Any], *, history: Seque
     if missing:
         raise DeepSeekSchemaError(f"plan response missing fields: {sorted(missing)}")
     topic = _required_string(response.get("topic"), "topic", max_length=1000)
-    keywords = _string_list(response.get("keywords"), "keywords", required=True)
-    synonyms = _string_list(response.get("synonyms"), "synonyms")
-    methods = _string_list(response.get("methods"), "methods")
-    datasets = _string_list(response.get("datasets"), "datasets")
-    tasks = _string_list(response.get("tasks"), "tasks", required=True)
+    # 列表字段元素级宽容：畸形元素过滤；必需列表为空时从 topic 兜底推导，
+    # 避免一条坏数据把整个计划打回规则规划器。
+    keywords = _string_list_tolerant(response.get("keywords"), max_items=24)
+    synonyms = _string_list_tolerant(response.get("synonyms"))
+    methods = _string_list_tolerant(response.get("methods"))
+    datasets = _string_list_tolerant(response.get("datasets"))
+    tasks = _string_list_tolerant(response.get("tasks")) or _string_list_tolerant(response.get("research_questions"))
+    if not keywords:
+        keywords = [item for item in re.findall(r"[\w-]+", topic, flags=re.UNICODE) if len(item) > 1][:12] or [topic]
+    if not tasks:
+        tasks = [topic]
     time_range = _years(response.get("time_range"))
     hard = _constraints(response.get("hard_constraints"), "hard_constraints")
     soft = _constraints(response.get("soft_constraints"), "soft_constraints")
     sources = _source_list(response.get("source_capabilities"), "source_capabilities")
-    gaps = _string_list(response.get("gaps"), "gaps")
-    unknown_gaps = set(gaps) - GAP_CODES
-    if unknown_gaps:
-        raise DeepSeekSchemaError(f"gaps contains unsupported codes: {sorted(unknown_gaps)}")
+    gaps = [gap for gap in _string_list_tolerant(response.get("gaps")) if gap in GAP_CODES]
     queries = response.get("queries")
     if not isinstance(queries, list) or not 1 <= len(queries) <= 12:
         raise DeepSeekSchemaError("queries must contain between 1 and 12 items")
@@ -305,14 +329,54 @@ def _paper_summary(paper: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_judgements(response: Mapping[str, Any], expected_ids: Sequence[str]) -> list[dict[str, Any]]:
+def _tolerant_score(value: Any, default: float = 0.5) -> float:
+    """判断条目用的分数解析：畸形值退到中性 default，不丢弃整条。"""
+
+    try:
+        return _score(value, "score")
+    except DeepSeekSchemaError:
+        return default
+
+
+def _normalise_judgement_item(item: Mapping[str, Any], expected_id: str) -> dict[str, Any]:
+    paper_id = _required_string(item.get("paper_id"), "results.paper_id", max_length=500)
+    if paper_id != expected_id:
+        raise DeepSeekSchemaError("results.paper_id does not match candidate")
+    score = item.get("relevance_score", item.get("score", item.get("relevance")))
+    if score is None:
+        raise DeepSeekSchemaError("results.relevance_score is required")
+    normalized_score = _tolerant_score(score)
+    raw_label = item.get("relevance_label") or item.get("label")
+    label = {"yes": "relevant", "match": "relevant", "high": "relevant", "true": "relevant", "maybe": "borderline", "uncertain": "borderline", "no": "irrelevant", "low": "irrelevant", "false": "irrelevant"}.get(str(raw_label or "").casefold(), "")
+    if not label:
+        # 模型偶尔产出自由文本标签；分数是唯一必需信号，按分数兜底而不是丢弃整条。
+        label = "relevant" if normalized_score >= 0.6 else "irrelevant" if normalized_score < 0.3 else "borderline"
+    raw_state = item.get("hard_constraint_state") or item.get("constraint_state")
+    state = {"yes": "pass", "true": "pass", "pass": "pass", "no": "fail", "false": "fail", "fail": "fail", "unknown": "unknown"}.get(str(raw_state or "").casefold(), "unknown")
+    raw_evidence = item.get("evidence_needed", [])
+    evidence = _string_list(raw_evidence if isinstance(raw_evidence, list) else [], "results.evidence_needed", max_items=12)
+    raw_reason = item.get("reason")
+    reason = str(raw_reason).strip()[:1500] if raw_reason is not None else ""
+    return {
+        "paper_id": paper_id,
+        "relevance_score": normalized_score,
+        "relevance_label": label,
+        "hard_constraint_state": state,
+        "reason": reason or "model judgement without additional explanation",
+        "evidence_needed": evidence,
+        "confidence": _tolerant_score(item.get("confidence", 0.5)),
+    }
+
+
+def _judgement_values(response: Mapping[str, Any]) -> Any:
     values = response.get("results") or response.get("judgements") or response.get("judgments")
     if values is None and response.get("paper_id"):
         values = [response]
-    if response.get("schema_version") != DEEPSEEK_JUDGEMENT_SCHEMA:
-        response = {**response, "schema_version": DEEPSEEK_JUDGEMENT_SCHEMA}
-    if values is None:
-        values = []
+    return values if values is not None else []
+
+
+def _validate_judgements(response: Mapping[str, Any], expected_ids: Sequence[str]) -> list[dict[str, Any]]:
+    values = _judgement_values(response)
     if not isinstance(values, list):
         raise DeepSeekSchemaError("results must be an array")
     supplied_ids = [str(item.get("paper_id")) for item in values if isinstance(item, Mapping) and item.get("paper_id")]
@@ -320,43 +384,56 @@ def _validate_judgements(response: Mapping[str, Any], expected_ids: Sequence[str
         raise DeepSeekSchemaError("results contain duplicate or unknown candidate PaperDoc")
     if len(values) != len(expected_ids):
         raise DeepSeekSchemaError("results must contain exactly one item per candidate PaperDoc")
-    expected = list(expected_ids)
-    seen: set[str] = set()
     output: list[dict[str, Any]] = []
-    for index, item in enumerate(values):
+    seen: set[str] = set()
+    for item in values:
         if not isinstance(item, Mapping):
-            raise DeepSeekSchemaError(f"results[{index}] must be an object")
-        paper_id = _required_string(item.get("paper_id"), f"results[{index}].paper_id", max_length=500)
-        if paper_id not in expected or paper_id in seen:
-            raise DeepSeekSchemaError(f"results[{index}].paper_id does not match candidates")
+            raise DeepSeekSchemaError("results items must be objects")
+        paper_id = _required_string(item.get("paper_id"), "results.paper_id", max_length=500)
+        if paper_id not in expected_ids or paper_id in seen:
+            raise DeepSeekSchemaError("results.paper_id does not match candidates")
         seen.add(paper_id)
-        score = item.get("relevance_score", item.get("score", item.get("relevance")))
-        if score is None:
-            raise DeepSeekSchemaError(f"results[{index}].relevance_score is required")
-        normalized_score = _score(score, f"results[{index}].relevance_score")
-        raw_label = item.get("relevance_label") or item.get("label")
-        label = raw_label or ("relevant" if normalized_score >= 0.6 else "borderline")
-        label = {"yes": "relevant", "match": "relevant", "high": "relevant", "true": "relevant", "maybe": "borderline", "uncertain": "borderline", "no": "irrelevant", "low": "irrelevant", "false": "irrelevant"}.get(str(label).casefold(), str(label).casefold())
-        if label not in JUDGEMENT_LABELS:
-            raise DeepSeekSchemaError(f"results[{index}].relevance_label is invalid")
-        raw_state = item.get("hard_constraint_state") or item.get("constraint_state")
-        state = "unknown" if raw_state is None else {"yes": "pass", "true": "pass", "pass": "pass", "no": "fail", "false": "fail", "fail": "fail", "unknown": "unknown"}.get(str(raw_state).casefold(), "invalid")
-        if state not in CONSTRAINT_STATES:
-            raise DeepSeekSchemaError(f"results[{index}].hard_constraint_state is invalid")
-        raw_evidence = item.get("evidence_needed", [])
-        evidence = _string_list(raw_evidence, f"results[{index}].evidence_needed", max_items=12)
-        output.append({
-            "paper_id": paper_id,
-            "relevance_score": normalized_score,
-            "relevance_label": label,
-            "hard_constraint_state": state,
-            "reason": _required_string(item.get("reason") or "model judgement without additional explanation", f"results[{index}].reason", max_length=1500),
-            "evidence_needed": evidence,
-            "confidence": _score(item.get("confidence", 0.5), f"results[{index}].confidence"),
-        })
-    if set(seen) != set(expected):
+        output.append(_normalise_judgement_item(item, paper_id))
+    if set(seen) != set(expected_ids):
         raise DeepSeekSchemaError("results are missing candidate PaperDocs")
     return output
+
+
+def _parse_judgements_partial(response: Mapping[str, Any], expected_ids: Sequence[str]) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """逐条接受合法判断；畸形条目只记 issue，不再拖垮整批。
+
+    返回 (合法条目, 未覆盖的候选 ID, 问题清单)。零合法条目由调用方按
+    整批失败处理（触发减半重试）。
+    """
+
+    values = _judgement_values(response)
+    if not isinstance(values, list):
+        raise DeepSeekSchemaError("results must be an array")
+    expected = list(expected_ids)
+    valid: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    issues: list[str] = []
+    for item in values:
+        if not isinstance(item, Mapping):
+            issues.append("non_object_result_item")
+            continue
+        paper_id = str(item.get("paper_id") or "")
+        if not paper_id:
+            issues.append("result_item_without_paper_id")
+            continue
+        if paper_id not in expected:
+            issues.append(f"unknown_paper_id:{paper_id[:48]}")
+            continue
+        if paper_id in seen:
+            issues.append(f"duplicate_paper_id:{paper_id[:48]}")
+            continue
+        try:
+            valid.append(_normalise_judgement_item(item, paper_id))
+            seen.add(paper_id)
+        except DeepSeekSchemaError as exc:
+            issues.append(f"invalid_item:{paper_id[:48]}:{exc}")
+    missing = [paper_id for paper_id in expected if paper_id not in seen]
+    return valid, missing, issues
 
 
 class DeepSeekClient:
@@ -464,8 +541,11 @@ class DeepSeekClient:
 class DeepSeekUnderstandingLayer:
     """DeepSeek 的前置查询规划和召回后判断。"""
 
+    MAX_JUDGE_BATCH = 10
+
     def __init__(self, client: DeepSeekClient | None = None) -> None:
         self.client = client or DeepSeekClient()
+        self.last_judge_issues: list[str] = []
 
     def plan(self, query: str, *, history: Sequence[Mapping[str, Any]] | None = None) -> QueryPlan:
         if not isinstance(query, str) or not query.strip():
@@ -474,15 +554,71 @@ class DeepSeekUnderstandingLayer:
         user = json.dumps({"task": "decompose_query", "schema_version": DEEPSEEK_PLAN_SCHEMA, "query": query, "history": list(history or []), "required": {"topic": "string", "keywords": "string[]", "synonyms": "string[]", "methods": "string[]", "datasets": "string[]", "tasks": "string[]", "time_range": {"start_year": "integer|null", "end_year": "integer|null"}, "hard_constraints": "constraint[]", "soft_constraints": "constraint[]", "source_capabilities": sorted(SOURCE_CAPABILITIES), "queries": "1-12 query objects with kind/query_text/source_capabilities", "gaps": sorted(GAP_CODES)}}, ensure_ascii=False)
         return _plan_payload(query, self.client.complete_json(system, user), history=history)
 
+    def _judge_request(self, query_plan: Mapping[str, Any], summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        # 输出预算随候选数放大：逐篇结论 + 固定开销，避免大批次被截断。
+        max_tokens = min(8000, 150 * len(summaries) + 400)
+        system = "You are an academic paper relevance judge. Return JSON only. Judge only supplied PaperDoc facts; do not invent metadata. Keep each reason under 40 words."
+        user = json.dumps({"task": "judge_candidates", "schema_version": DEEPSEEK_JUDGEMENT_SCHEMA, "query_plan": {"query_id": query_plan["query_id"], "raw_query": query_plan["raw_query"], "topic": query_plan["topic"], "methods": query_plan["methods"], "datasets": query_plan["datasets"], "tasks": query_plan["tasks"], "time_range": query_plan["time_range"], "hard_constraints": query_plan["hard_constraints"]}, "candidates": list(summaries), "required_result_fields": ["paper_id", "relevance_score", "relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence"]}, ensure_ascii=False)
+        return self.client.complete_json(system, user, max_tokens=max_tokens)
+
     def judge(self, query_plan: Mapping[str, Any], papers: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """批量判断候选论文，逐条校验并部分接受。
+
+        失败策略：整批无效时按减半批次重试；部分有效时只重试缺失的候选；
+        单篇仍失败则放弃该篇（保留词法分），不再让一篇畸形响应拖垮整批。
+        `last_judge_issues` 记录本次调用的全部问题，供 manifest 审计。
+        """
+
         validate_query_plan(query_plan)
         summaries = [_paper_summary(paper) for paper in papers]
         ids = [item["paper_id"] for item in summaries]
         if len(set(ids)) != len(ids):
             raise DeepSeekSchemaError("candidate PaperDoc paper_id values must be unique")
-        system = "You are an academic paper relevance judge. Return JSON only. Judge only supplied PaperDoc facts; do not invent metadata."
-        user = json.dumps({"task": "judge_candidates", "schema_version": DEEPSEEK_JUDGEMENT_SCHEMA, "query_plan": {"query_id": query_plan["query_id"], "raw_query": query_plan["raw_query"], "topic": query_plan["topic"], "methods": query_plan["methods"], "datasets": query_plan["datasets"], "tasks": query_plan["tasks"], "time_range": query_plan["time_range"], "hard_constraints": query_plan["hard_constraints"]}, "candidates": summaries, "required_result_fields": ["paper_id", "relevance_score", "relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence"]}, ensure_ascii=False)
-        return _validate_judgements(self.client.complete_json(system, user), ids)
+        by_id = dict(zip(ids, summaries))
+        results: dict[str, dict[str, Any]] = {}
+        issues: list[str] = []
+        self.last_judge_issues = issues
+        queue: list[str] = list(ids)
+        # cap 是当前批次上限：失败时对同一队头减半重试，成功后恢复满批。
+        cap = self.MAX_JUDGE_BATCH
+        while queue:
+            batch = queue[:cap]
+            rest = queue[cap:]
+            try:
+                response = self._judge_request(query_plan, [by_id[paper_id] for paper_id in batch])
+                valid, missing, batch_issues = _parse_judgements_partial(response, batch)
+            except DeepSeekCallError as exc:
+                if exc.code == "budget":
+                    issues.append(f"budget_exhausted:{len(queue)}_candidates_left_lexical")
+                    break
+                if len(batch) == 1:
+                    issues.append(f"judge_failed:{batch[0][:48]}:{exc.code}")
+                    queue = rest
+                    cap = self.MAX_JUDGE_BATCH
+                else:
+                    cap = max(1, len(batch) // 2)
+                continue
+            except DeepSeekSchemaError as exc:
+                if len(batch) == 1:
+                    issues.append(f"judge_failed:{batch[0][:48]}:schema:{exc}")
+                    queue = rest
+                    cap = self.MAX_JUDGE_BATCH
+                else:
+                    cap = max(1, len(batch) // 2)
+                continue
+            issues.extend(batch_issues)
+            if valid:
+                for item in valid:
+                    results[item["paper_id"]] = item
+                queue = missing + list(rest)
+                cap = self.MAX_JUDGE_BATCH
+            elif len(batch) == 1:
+                issues.append(f"judge_failed:{batch[0][:48]}:no_valid_result")
+                queue = rest
+                cap = self.MAX_JUDGE_BATCH
+            else:
+                cap = max(1, len(batch) // 2)
+        return [results[paper_id] for paper_id in ids if paper_id in results]
 
 
 __all__ = ["DEEPSEEK_JUDGEMENT_SCHEMA", "DEEPSEEK_PLAN_SCHEMA", "DeepSeekCallError", "DeepSeekClient", "DeepSeekSchemaError", "DeepSeekUnderstandingLayer", "TransportResponse"]

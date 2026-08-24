@@ -223,10 +223,16 @@ class P2Pipeline:
             # and add only a local routing view.
             for subquery in iteration_plan["subqueries"]:
                 subquery["sources"] = list(subquery.get("source_capabilities") or [])
+            total_budget = int(plan["budget"]["max_provider_calls"])
             calls_before = sum(item.get("stats", {}).get("api_calls", 0) for item in run.recall) + sum(item.get("stats", {}).get("api_calls", 0) for item in run.citations)
-            remaining_calls = max(0, int(plan["budget"]["max_provider_calls"]) - calls_before)
+            remaining_calls = max(0, total_budget - calls_before)
+            # 召回不得吃光预算：DeepSeek 一次可能生成 10 条子查询 × 多来源，
+            # 若不设上限，引用扩展和第二轮迭代会被 BUDGET_EXHAUSTED 饿死
+            # （见 autoscholar/pipeline-n10：citation calls=0）。
+            recall_cap = min(remaining_calls, max(4, int(total_budget * 0.6)))
+            iteration_plan["subqueries"] = iteration_plan["subqueries"][: max(2, recall_cap)]
             started = perf_counter()
-            recall = RecallRunner(SourceRouter(self.providers), max_workers=self.max_workers, page_size=self.page_size).run(iteration_plan, iteration=iteration, max_calls=remaining_calls)
+            recall = RecallRunner(SourceRouter(self.providers), max_workers=self.max_workers, page_size=self.page_size).run(iteration_plan, iteration=iteration, max_calls=recall_cap)
             stage_ms["recall"] += (perf_counter() - started) * 1000
             run.recall.append(recall.to_dict())
             run.errors.extend(recall.source_errors)
@@ -260,6 +266,9 @@ class P2Pipeline:
                     try:
                         deepseek_judge_batches += 1
                         judgements.update({str(item["paper_id"]): item for item in self.understanding_layer.judge(plan, batch)})
+                        # 部分接受策略下，被放弃/重试的条目显式进入错误审计。
+                        for issue in getattr(self.understanding_layer, "last_judge_issues", []):
+                            run.errors.append({"source": "deepseek", "code": "judge_partial", "message": str(issue)[:200], "stage": "judge"})
                     except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
                         llm_unavailable_ids.update(str(item["paper_id"]) for item in batch)
                         run.errors.append({"source": "deepseek", "code": getattr(exc, "code", "judge_fallback"), "message": str(exc)[:200], "stage": "judge"})
