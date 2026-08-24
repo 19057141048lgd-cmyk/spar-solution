@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     tree.add_argument("--max-depth", type=int, default=2)
     tree.add_argument("--docs-to-expand", type=int, default=8)
     tree.add_argument("--max-provider-calls", type=int, default=30)
+    tree.add_argument("--fulltext-topk", type=int, default=0, help="对前 K 篇做本地全文抽取增强（0=关闭）")
     return parser
 
 
@@ -96,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "tree":
         runner = build_tree_runner(page_size=args.page_size, max_depth=args.max_depth, docs_to_expand=args.docs_to_expand, max_provider_calls=args.max_provider_calls)
         tree_result = runner.run(args.query)
+        if getattr(args, "fulltext_topk", 0) > 0:
+            from .fulltext import augment_topk, query_terms
+
+            tree_result["papers"], _ft_stats = augment_topk(tree_result["papers"], Path(args.output), query_terms(args.query), top_k=args.fulltext_topk)
+            tree_result["papers"].sort(key=lambda p: (p.get("scores", {}).get("relevance") is not None, p.get("scores", {}).get("relevance") or -1.0), reverse=True)
         root = Path(args.output)
         root.mkdir(parents=True, exist_ok=True)
         for name, payload in (("papers", {"papers": tree_result["papers"]}), ("nodes", tree_result["nodes"]), ("edges", tree_result["edges"]), ("stats", tree_result["stats"]), ("errors", tree_result["errors"])):

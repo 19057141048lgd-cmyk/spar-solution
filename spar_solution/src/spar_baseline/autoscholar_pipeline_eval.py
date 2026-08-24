@@ -33,6 +33,7 @@ def run_pipeline_eval(
     sleep_seconds: float = 3.0,
     exclude_sources: tuple[str, ...] = ("bohrium",),
     strategy: str = "pipeline",
+    fulltext_topk: int = 0,
 ) -> dict[str, Any]:
     rows = load_rows(dataset, offset=offset, limit=limit)
     if not rows:
@@ -62,6 +63,14 @@ def run_pipeline_eval(
         try:
             if strategy == "tree":
                 tree_result = tree_runner.run(question)
+                if fulltext_topk > 0:
+                    # 全文第 1 层（本地 PDF 抽取）：只增强前 top_k 篇并按微调分重排。
+                    from .fulltext import augment_topk, query_terms
+
+                    terms = query_terms(question)
+                    tree_result["papers"], ft_stats = augment_topk(tree_result["papers"], run_dir, terms, top_k=fulltext_topk)
+                    tree_result["papers"].sort(key=lambda p: (p.get("scores", {}).get("relevance") is not None, p.get("scores", {}).get("relevance") or -1.0), reverse=True)
+                    item["fulltext"] = ft_stats
                 run_dir.mkdir(parents=True, exist_ok=True)
                 for name, payload in (("papers", {"papers": tree_result["papers"]}), ("nodes", tree_result["nodes"]), ("edges", tree_result["edges"]), ("stats", tree_result["stats"]), ("errors", tree_result["errors"])):
                     (run_dir / f"{name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -161,8 +170,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--page-size", type=int, default=10)
     parser.add_argument("--sleep", type=float, default=3.0)
     parser.add_argument("--strategy", choices=("pipeline", "tree"), default="pipeline")
+    parser.add_argument("--fulltext-topk", type=int, default=0, help="仅 tree 策略：对前 K 篇做本地全文抽取增强（0=关闭）")
     args = parser.parse_args(argv)
-    payload = run_pipeline_eval(args.dataset, args.output, offset=args.offset, limit=args.limit, page_size=args.page_size, sleep_seconds=args.sleep, strategy=args.strategy)
+    payload = run_pipeline_eval(args.dataset, args.output, offset=args.offset, limit=args.limit, page_size=args.page_size, sleep_seconds=args.sleep, strategy=args.strategy, fulltext_topk=args.fulltext_topk)
     print(json.dumps({"output": args.output, "results": payload["results"], "totals": payload["totals"]}, ensure_ascii=False, indent=2))
     return 0
 

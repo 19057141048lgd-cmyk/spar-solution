@@ -293,3 +293,62 @@ class SearchTreeRunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecallPackageTests(unittest.TestCase):
+    """召回修复包（净化/垃圾池重搜/兜底种子）的专项回归。"""
+
+    def test_sanitize_query_strips_question_shell_only(self):
+        from spar_solution.src.spar_baseline.search_tree import _sanitize_query
+
+        shell = "Can you tell me some papers about hybrid architectures in reconstruction-based techniques?"
+        cleaned = _sanitize_query(shell)
+        self.assertNotIn("tell", cleaned)
+        self.assertNotIn("?", cleaned)
+        self.assertIn("hybrid", cleaned)
+        keyword = "CSI Vital Sign Deep Learning Estimation"
+        self.assertEqual(_sanitize_query(keyword), keyword)  # 关键词式原样放行（保留大小写）
+
+    def test_best_effort_seeds_expand_without_high_relevance(self):
+        # 词法相关约 0.4（一半查询词命中）且带摘要：不到 0.75 门槛也必须扩引用。
+        seed = _fixture_paper(
+            "fixture:be:seed",
+            "10.1234/be.seed",
+            "WiFi heart rate partial match",
+            "Contactless vital sign estimation study with only partial WiFi coverage of the topic words.",
+        )
+        child = _fixture_paper(
+            "fixture:be:child",
+            "10.1234/be.child",
+            "WiFi heart rate measurement",
+            "Reference paper on WiFi CSI heart rate monitoring measurement.",
+        )
+        child["relation_type"] = "references"
+        provider = FixtureProvider("arxiv", [seed], {seed["paper_id"]: [child]})
+        runner = SearchTreeRunner({"arxiv": provider}, max_depth=1, max_provider_calls=10)
+        result = runner.run("WiFi heart rate monitoring")
+        self.assertGreater(len(result["edges"]), 0, "兜底种子未触发引用扩展")
+        self.assertTrue(any(p["paper_id"] == child["paper_id"] for p in result["papers"]))
+
+    def test_best_effort_seeds_skip_offtopic_pool(self):
+        # 词法分低于 0.3 地板：整体错领域，不应浪费引用调用。
+        junk = _fixture_paper(
+            "fixture:junk",
+            "10.1234/junk.1",
+            "Dynamics of controlled hybrid systems",
+            "Control theory stability analysis for switched systems with lyapunov functions and no overlap words here.",
+        )
+        provider = FixtureProvider("arxiv", [junk], {junk["paper_id"]: []})
+        runner = SearchTreeRunner({"arxiv": provider}, max_depth=1, max_provider_calls=10)
+        result = runner.run("WiFi heart rate monitoring")
+        self.assertEqual(len(result["edges"]), 0)
+
+    def test_rephrase_fallback_without_llm(self):
+        from spar_solution.src.spar_baseline.search_tree import _plan_queries, _sanitize_query
+
+        runner = SearchTreeRunner({"arxiv": FixtureProvider("arxiv", [], {})}, max_depth=2)
+        plan = runner.planner.plan("WiFi heart rate monitoring")
+        queries = runner._rephrase_queries("WiFi heart rate monitoring", set(), plan, plan, [], 1)
+        self.assertTrue(queries, "规则兜底应返回可检索查询")
+        self.assertTrue(all(_sanitize_query(q) for q in queries))
+        self.assertEqual([q for q in queries], [q for q in _plan_queries(plan, runner.queries_per_level)] if set() == set() else queries)
