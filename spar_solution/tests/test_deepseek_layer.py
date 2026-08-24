@@ -9,6 +9,7 @@ from spar_solution.src.spar_baseline.deepseek_layer import (
     DeepSeekSchemaError,
     DeepSeekUnderstandingLayer,
     TransportResponse,
+    blend_relevance,
 )
 from spar_solution.src.spar_baseline.mock_pipeline import _paper
 from spar_solution.src.spar_baseline.query_plan import validate_query_plan
@@ -292,6 +293,76 @@ class DeepSeekLayerTests(unittest.TestCase):
             client.complete_json("system", "user")
         self.assertEqual(client.usage["calls"], 1)
         self.assertEqual(client.usage["failures"], 1)
+
+    def _judge_request_body(self):
+        """跑一次 plan+judge，返回 judge 请求体（messages JSON 解析结果）。"""
+
+        paper = _paper("arxiv", "WiFi heart rate")
+        paper["paper_id"] = "arxiv:1234.0001"
+        ok = {"results": [{"paper_id": paper["paper_id"], "relevance_score": 0.9}]}
+        transport = FakeTransport([_plan_response(), ok])
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=transport))
+        layer.judge(layer.plan("WiFi heart rate"), [paper])
+        return json.loads(transport.calls[-1][3])
+
+    def test_judge_prompt_contains_rubric_bands(self):
+        # 量规必须锚定分数档位，抑制"一次 1.0 一次 0.05"的运行间抖动。
+        system = self._judge_request_body()["messages"][0]["content"]
+        for fragment in ("0.90-1.00", "0.70-0.89", "0.40-0.69", "0.10-0.39", "0.00-0.09", "primary research"):
+            self.assertIn(fragment, system)
+        # 原有约束保留：JSON-only、不得编造元数据。
+        self.assertIn("Return JSON only", system)
+        self.assertIn("do not invent metadata", system)
+
+    def test_judge_prompt_prefers_primary_research_over_surveys(self):
+        system = self._judge_request_body()["messages"][0]["content"]
+        self.assertIn("surveys or textbooks", system)
+        self.assertIn("A survey only scores >=0.7", system)
+        self.assertIn("Judge against the raw question", system)
+
+    def test_judge_prompt_requires_one_item_per_candidate_and_keeps_user_protocol(self):
+        body = self._judge_request_body()
+        system = body["messages"][0]["content"]
+        self.assertIn("exactly one item per candidate", system)
+        self.assertIn("paper_id", system)
+        # user 侧协议未变：仍是可解析 JSON，query_plan 保留 tasks/methods/datasets。
+        user = json.loads(body["messages"][1]["content"])
+        self.assertEqual(user["task"], "judge_candidates")
+        self.assertEqual(user["schema_version"], DEEPSEEK_JUDGEMENT_SCHEMA)
+        for key in ("tasks", "methods", "datasets"):
+            self.assertIn(key, user["query_plan"])
+
+    def test_blend_relevance_weighted_average_without_penalty(self):
+        self.assertEqual(blend_relevance(0.8, 0.6), 0.73)
+        self.assertEqual(blend_relevance(0.5, 0.5), 0.5)
+        self.assertEqual(blend_relevance(0.9, 0.7, llm_weight=1.0), 0.9)
+        self.assertEqual(blend_relevance(0.9, 0.7, llm_weight=0.0), 0.7)
+
+    def test_blend_relevance_applies_disagreement_penalty_beyond_threshold(self):
+        # LLM 突然给 0.05 而词法 0.6：不直接输出 0.05，也不简单取平均。
+        # 0.65*0.05 + 0.35*0.6 = 0.2425，差值 0.55 > 0.5 再减 0.10*0.55。
+        self.assertEqual(blend_relevance(0.05, 0.6), 0.1875)
+        # 0.65*0.95 + 0.35*0.2 = 0.6875，差值 0.75 > 0.5 再减 0.075。
+        self.assertEqual(blend_relevance(0.95, 0.2), 0.6125)
+        # 边界：差值恰好等于阈值（0.5）不触发惩罚。
+        self.assertEqual(blend_relevance(0.8, 0.3), 0.625)
+
+    def test_blend_relevance_handles_missing_inputs(self):
+        self.assertIsNone(blend_relevance(None, None))
+        self.assertEqual(blend_relevance(None, 0.6), 0.6)
+        self.assertEqual(blend_relevance(0.42, None), 0.42)
+
+    def test_blend_relevance_clamps_to_unit_interval(self):
+        self.assertEqual(blend_relevance(1.0, 1.5), 1.0)
+        self.assertEqual(blend_relevance(0.0, -0.2), 0.0)
+        # 惩罚把结果压到负值时也要 clamp 到 0。
+        self.assertEqual(blend_relevance(0.0, 0.9, disagreement_penalty=0.5), 0.0)
+
+    def test_blend_relevance_rejects_invalid_weight(self):
+        with self.assertRaises(ValueError):
+            blend_relevance(0.5, 0.5, llm_weight=1.5)
+        with self.assertRaises(ValueError):
+            blend_relevance(0.5, 0.5, llm_weight=-0.01)
 
 
 if __name__ == "__main__":

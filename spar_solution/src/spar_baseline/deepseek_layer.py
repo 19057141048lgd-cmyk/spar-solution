@@ -436,6 +436,34 @@ def _parse_judgements_partial(response: Mapping[str, Any], expected_ids: Sequenc
     return valid, missing, issues
 
 
+def blend_relevance(llm_score: float | None, lexical_score: float | None, *, llm_weight: float = 0.65, disagreement_penalty: float = 0.10, penalty_threshold: float = 0.5) -> float | None:
+    """LLM 相关性分与词法相关性分的保守融合（供管线集成使用）。
+
+    设计意图：判断层运行间不稳定——同一论文的 LLM 分会在 0.05 与 1.0 之间
+    跳变。词法分作为独立第二信号拉住 LLM 的极端输出：blended =
+    llm_weight*llm + (1-llm_weight)*lexical；两侧严重打架
+    （|llm-lexical| > penalty_threshold）时再减 disagreement_penalty*差值，
+    抑制任一侧过度自信，而不是简单取平均。
+
+    - 双侧均 None 返回 None；只有一侧有值时直接返回该值（缺失侧按无信息
+      处理，不用 0.5 之类的中性值顶替加权份额）。
+    - 结果 clamp 到 [0, 1] 并 round 到 6 位小数；llm_weight 必须在 [0, 1]。
+    """
+
+    if not 0 <= llm_weight <= 1:
+        raise ValueError("llm_weight must be between 0 and 1")
+    if llm_score is None and lexical_score is None:
+        return None
+    if llm_score is None or lexical_score is None:
+        available = llm_score if llm_score is not None else lexical_score
+        return round(max(0.0, min(1.0, float(available))), 6)
+    blended = llm_weight * llm_score + (1 - llm_weight) * lexical_score
+    disagreement = abs(llm_score - lexical_score)
+    if disagreement > penalty_threshold:
+        blended -= disagreement_penalty * disagreement
+    return round(max(0.0, min(1.0, blended)), 6)
+
+
 class DeepSeekClient:
     """只负责一次 DeepSeek JSON 调用的最小客户端。"""
 
@@ -538,6 +566,20 @@ class DeepSeekClient:
         return dict(content)
 
 
+# 判断层 system prompt：带评分量规（rubric）锚定分数档位，抑制运行间抖动
+# （真实运行中同一论文曾在 1.0 与 0.05 之间跳变，综述稳定挤掉原始研究）。
+_JUDGE_SYSTEM_PROMPT = (
+    "You are an academic paper relevance judge. Return JSON only. Judge only supplied PaperDoc facts; do not invent metadata. Keep each reason under 40 words.\n"
+    "Score every candidate strictly against this rubric:\n"
+    "- 0.90-1.00: primary research that directly answers the research question (its methods/objects precisely match what the question asks).\n"
+    "- 0.70-0.89: highly relevant: same core topic, but the angle is slightly off.\n"
+    "- 0.40-0.69: partially relevant: shares methods or datasets but studies a different research question.\n"
+    "- 0.10-0.39: weakly relevant: only broad field overlap (e.g. both are NLP).\n"
+    "- 0.00-0.09: irrelevant.\n"
+    "Prefer the specific primary research papers that answer the question over broad surveys or textbooks. A survey only scores >=0.7 if the question explicitly asks for surveys/overviews. Judge against the raw question, not just topic keywords. Return exactly one item per candidate with the given paper_id."
+)
+
+
 class DeepSeekUnderstandingLayer:
     """DeepSeek 的前置查询规划和召回后判断。"""
 
@@ -557,7 +599,7 @@ class DeepSeekUnderstandingLayer:
     def _judge_request(self, query_plan: Mapping[str, Any], summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         # 输出预算随候选数放大：逐篇结论 + 固定开销，避免大批次被截断。
         max_tokens = min(8000, 150 * len(summaries) + 400)
-        system = "You are an academic paper relevance judge. Return JSON only. Judge only supplied PaperDoc facts; do not invent metadata. Keep each reason under 40 words."
+        system = _JUDGE_SYSTEM_PROMPT
         user = json.dumps({"task": "judge_candidates", "schema_version": DEEPSEEK_JUDGEMENT_SCHEMA, "query_plan": {"query_id": query_plan["query_id"], "raw_query": query_plan["raw_query"], "topic": query_plan["topic"], "methods": query_plan["methods"], "datasets": query_plan["datasets"], "tasks": query_plan["tasks"], "time_range": query_plan["time_range"], "hard_constraints": query_plan["hard_constraints"]}, "candidates": list(summaries), "required_result_fields": ["paper_id", "relevance_score", "relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence"]}, ensure_ascii=False)
         return self.client.complete_json(system, user, max_tokens=max_tokens)
 
@@ -621,4 +663,4 @@ class DeepSeekUnderstandingLayer:
         return [results[paper_id] for paper_id in ids if paper_id in results]
 
 
-__all__ = ["DEEPSEEK_JUDGEMENT_SCHEMA", "DEEPSEEK_PLAN_SCHEMA", "DeepSeekCallError", "DeepSeekClient", "DeepSeekSchemaError", "DeepSeekUnderstandingLayer", "TransportResponse"]
+__all__ = ["DEEPSEEK_JUDGEMENT_SCHEMA", "DEEPSEEK_PLAN_SCHEMA", "DeepSeekCallError", "DeepSeekClient", "DeepSeekSchemaError", "DeepSeekUnderstandingLayer", "TransportResponse", "blend_relevance"]
