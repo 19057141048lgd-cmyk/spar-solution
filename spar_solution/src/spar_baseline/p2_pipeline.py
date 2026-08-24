@@ -23,9 +23,10 @@ from .p2_stop import StopController, StopDecision
 from .providers.base import ProviderError, ProviderResult
 from .query_plan import QueryPlanValidationError, validate_query_plan
 from .query_planner import QueryPlanner
-from .deepseek_layer import DeepSeekCallError, DeepSeekSchemaError, DeepSeekUnderstandingLayer
+from .deepseek_layer import DeepSeekCallError, DeepSeekSchemaError, DeepSeekUnderstandingLayer, blend_relevance
 from .final_output import build_final_selection, validate_final_selection
 from .p2_evidence import ConstraintResult, ConstraintVerdict
+from .rank_fusion import rrf_fuse, spar_rank
 
 
 def _jsonable(value: Any) -> Any:
@@ -68,6 +69,25 @@ def _deduplicate(records: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, A
         except Exception as exc:
             errors.append({"code": "parse", "message": str(exc), "record_index": index})
     return output, errors
+
+
+def _group_by_source(records: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """把 RecallRunner 的扁平记录按首次出现的来源分组成有序列表，供 RRF 融合。"""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        sources = (record.get("provenance") or {}).get("sources") or []
+        source = str(sources[0]) if sources else "unknown"
+        grouped.setdefault(source, []).append(dict(record))
+    return grouped
+
+
+def _final_rank(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """SPAR 式最终排序：final 分 0.05 分桶，桶内按引用数、年份破平；被硬约束排除的垫底。"""
+
+    ranked = spar_rank([p for p in papers if p.get("scores", {}).get("final") is not None], sim_key="final")
+    excluded = [p for p in papers if p.get("scores", {}).get("final") is None]
+    return ranked + excluded
 
 
 def _annotate(doc: dict[str, Any], verdict: EvidenceVerdict, constraint: Any, evidence: list[Any], *, stage: str = "p2") -> dict[str, Any]:
@@ -125,7 +145,7 @@ def _apply_prepared_scores(
     verdicts: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
     unavailable = {str(item) for item in unavailable_ids}
-    for paper_id, (paper, constraint, items, _) in prepared.items():
+    for paper_id, (paper, constraint, items, lexical_relevance) in prepared.items():
         judgement = judgements.get(paper_id)
         if judgement is not None:
             state = str(judgement.get("hard_constraint_state") or "unknown")
@@ -133,18 +153,24 @@ def _apply_prepared_scores(
                 constraint = ConstraintVerdict(state="fail", results=constraint.results + (ConstraintResult("deepseek", "explicit", "fail", "deepseek_explicit_fail"),), reason_codes=constraint.reason_codes + ("deepseek_explicit_fail",))
             elif state == "unknown" and constraint.state == "pass":
                 constraint = ConstraintVerdict(state="unknown", results=constraint.results, reason_codes=constraint.reason_codes + ("deepseek_unknown",))
-        overrides = {"relevance": judgement["relevance_score"]} if judgement is not None else None
+        overrides = None
+        if judgement is not None:
+            # LLM 分与词法分融合而非直接覆盖：LLM 运行间抖动（同一论文 1.0→0.05）
+            # 由词法锚定；严重分歧时额外扣减置信度。
+            blended = blend_relevance(float(judgement.get("relevance_score") or 0.0), lexical_relevance)
+            if blended is not None:
+                overrides = {"relevance": blended}
         verdict = scorer.score(paper, plan, constraint, items, component_overrides=overrides)
         if paper_id in unavailable:
             verdict = replace(verdict, warnings=tuple(dict.fromkeys((*verdict.warnings, "llm_judge_unavailable"))))
         annotated = _annotate(paper, verdict, constraint, items, stage=stage)
         annotated.setdefault("provenance", {})["query_id"] = plan["query_id"]
         if judgement is not None:
-            annotated.setdefault("provenance", {}).setdefault(stage, {})["llm_judgement"] = {key: judgement.get(key) for key in ("relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
+            annotated.setdefault("provenance", {}).setdefault(stage, {})["llm_judgement"] = {key: judgement.get(key) for key in ("relevance_score", "relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
         judged.append(annotated)
         verdict_dict = verdict.to_dict()
         if judgement is not None:
-            verdict_dict["llm_judgement"] = {key: judgement.get(key) for key in ("relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
+            verdict_dict["llm_judgement"] = {key: judgement.get(key) for key in ("relevance_score", "relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
         verdicts.append(verdict_dict)
         evidence.extend(item.to_dict() if hasattr(item, "to_dict") else dict(item) for item in items)
     return judged, verdicts, evidence
@@ -236,7 +262,10 @@ class P2Pipeline:
             stage_ms["recall"] += (perf_counter() - started) * 1000
             run.recall.append(recall.to_dict())
             run.errors.extend(recall.source_errors)
-            unique, dedup_errors = _deduplicate([*seen, *recall.records])
+            # 多源结果先按各源名次做 RRF 融合（跨源一致的论文获得更高融合分
+            # 与 multi_source 标注），再并入候选池；单源时行为与直通一致。
+            fused_records = rrf_fuse(_group_by_source(recall.records)) if recall.records else []
+            unique, dedup_errors = _deduplicate([*seen, *fused_records])
             run.errors.extend(dedup_errors)
             new_count = max(0, len(unique) - len(seen))
             seen = unique
@@ -285,7 +314,8 @@ class P2Pipeline:
                         constraint = ConstraintVerdict(state="fail", results=constraint.results + (ConstraintResult("deepseek", "explicit", "fail", "deepseek_explicit_fail"),), reason_codes=constraint.reason_codes + ("deepseek_explicit_fail",))
                     elif state == "unknown" and constraint.state == "pass":
                         constraint = ConstraintVerdict(state="unknown", results=constraint.results, reason_codes=constraint.reason_codes + ("deepseek_unknown",))
-                    verdict = self.scorer.score(paper, plan, constraint, items, component_overrides={"relevance": judgement["relevance_score"]})
+                    blended = blend_relevance(float(judgement.get("relevance_score") or 0.0), prepared[paper_id][2].component_scores.get("relevance"))
+                    verdict = self.scorer.score(paper, plan, constraint, items, component_overrides={"relevance": blended} if blended is not None else None)
                 if paper_id in llm_unavailable_ids:
                     verdict = replace(verdict, warnings=tuple(dict.fromkeys((*verdict.warnings, "llm_judge_unavailable"))))
                 scored.append(_annotate(paper, verdict, constraint, items))
@@ -303,7 +333,7 @@ class P2Pipeline:
             # 引用扩展和最终输出必须使用已经附加分量分、约束状态及
             # evidence_refs 的 PaperDoc，而不能继续保留原始候选。
             seen = scored
-            scored.sort(key=lambda p: (p.get("scores", {}).get("final") is not None, p.get("scores", {}).get("final") or -1, p.get("paper_id", "")), reverse=True)
+            scored = _final_rank(scored)
             citation_budget = max(0, remaining_calls - recall.stats.get("api_calls", 0))
             citation_candidates = [paper for paper in scored if str(paper.get("paper_id")) not in citation_seed_ids and int((paper.get("provenance") or {}).get("citation_depth") or 0) < 1]
             started = perf_counter()
@@ -354,7 +384,8 @@ class P2Pipeline:
                             constraint = ConstraintVerdict(state="fail", results=constraint.results + (ConstraintResult("deepseek", "explicit", "fail", "deepseek_explicit_fail"),), reason_codes=constraint.reason_codes + ("deepseek_explicit_fail",))
                         elif state == "unknown" and constraint.state == "pass":
                             constraint = ConstraintVerdict(state="unknown", results=constraint.results, reason_codes=constraint.reason_codes + ("deepseek_unknown",))
-                        verdict = self.scorer.score(paper, plan, constraint, items, component_overrides={"relevance": judgement["relevance_score"]})
+                        blended = blend_relevance(float(judgement.get("relevance_score") or 0.0), verdict.component_scores.get("relevance"))
+                        verdict = self.scorer.score(paper, plan, constraint, items, component_overrides={"relevance": blended} if blended is not None else None)
                     if paper_id in child_llm_unavailable_ids:
                         verdict = replace(verdict, warnings=tuple(dict.fromkeys((*verdict.warnings, "llm_judge_unavailable"))))
                     scored_children.append(_annotate(paper, verdict, constraint, items))
@@ -374,7 +405,7 @@ class P2Pipeline:
                 citation_depth = 1
                 new_count = max(new_count, len(expanded) - len(seen))
                 seen = expanded
-            run.papers = sorted(seen, key=lambda p: (p.get("scores", {}).get("final") is not None, p.get("scores", {}).get("final") or -1, p.get("paper_id", "")), reverse=True)
+            run.papers = _final_rank(seen)
             new_ids = {str(item["paper_id"]) for item in seen} - prior_ids
             new_count = len(new_ids)
             previous_new.append(new_count)

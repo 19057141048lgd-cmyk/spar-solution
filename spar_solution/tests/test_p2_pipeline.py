@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spar_solution.src.spar_baseline.deepseek_layer import DeepSeekCallError, DeepSeekUnderstandingLayer
+from spar_solution.src.spar_baseline.deepseek_layer import DeepSeekCallError, DeepSeekUnderstandingLayer, blend_relevance
 from spar_solution.src.spar_baseline.p2_pipeline import FixtureProvider, P2Pipeline, replay_p2, run_p2_fixture
 from spar_solution.src.spar_baseline.mock_pipeline import _paper
 from spar_solution.src.spar_baseline.query_planner import QueryPlanner
@@ -114,7 +114,8 @@ class P2PipelineTests(unittest.TestCase):
         provider = FixtureProvider("arxiv", [paper], {})
         run = P2Pipeline({"arxiv": provider}, citation_enabled=False, understanding_layer=FakeUnderstandingLayer()).run("WiFi heart rate monitoring")
         self.assertTrue(run.papers)
-        self.assertAlmostEqual(run.papers[0]["scores"]["relevance"], 0.93)
+        # LLM 分(0.93)与词法分(1.0)按 blend_relevance 融合，而非原样覆盖。
+        self.assertAlmostEqual(run.papers[0]["scores"]["relevance"], blend_relevance(0.93, 1.0))
 
     def test_deepseek_judges_only_non_excluded_candidates(self):
         eligible = _paper("arxiv", "WiFi CSI heart rate monitoring")
@@ -143,7 +144,8 @@ class P2PipelineTests(unittest.TestCase):
         run = P2Pipeline({"arxiv": provider}, citation_enabled=True, understanding_layer=layer).run("WiFi heart rate monitoring")
         self.assertIn(parent["paper_id"], layer.judged_ids)
         self.assertIn(child["paper_id"], layer.judged_ids)
-        self.assertAlmostEqual(next(item for item in run.papers if item["paper_id"] == child["paper_id"])["scores"]["relevance"], 0.93)
+        # 子论文摘要只覆盖 3/4 查询词，词法分 0.75，与 LLM 分 0.93 融合。
+        self.assertAlmostEqual(next(item for item in run.papers if item["paper_id"] == child["paper_id"])["scores"]["relevance"], blend_relevance(0.93, 0.75))
         child_verdict = next(item for item in run.verdicts if item["paper_id"] == child["paper_id"])
         self.assertEqual(child_verdict["llm_judgement"]["reason"], "fixture")
         self.assertEqual(child_verdict["llm_judgement"]["confidence"], 0.9)

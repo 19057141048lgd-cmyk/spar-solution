@@ -32,13 +32,21 @@ def run_pipeline_eval(
     page_size: int = 10,
     sleep_seconds: float = 3.0,
     exclude_sources: tuple[str, ...] = ("bohrium",),
+    strategy: str = "pipeline",
 ) -> dict[str, Any]:
     rows = load_rows(dataset, offset=offset, limit=limit)
     if not rows:
         raise ValueError("no dataset rows selected")
+    if strategy not in ("pipeline", "tree"):
+        raise ValueError("strategy must be 'pipeline' or 'tree'")
     pipeline = build_live_pipeline(citation_enabled=True, page_size=page_size)
     for source in exclude_sources:
         pipeline.providers.pop(source, None)
+    tree_runner = None
+    if strategy == "tree":
+        # 直接复用已排除无效来源的 providers 与 LLM 层。
+        from .search_tree import SearchTreeRunner
+        tree_runner = SearchTreeRunner(pipeline.providers, pipeline.understanding_layer, page_size=page_size)
 
     output_root = Path(output)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -52,22 +60,44 @@ def run_pipeline_eval(
         run_dir = output_root / qid
         item: dict[str, Any] = {"qid": qid, "question": question, "gold_count": len(gold)}
         try:
-            run = pipeline.run(question, output_dir=run_dir)
-            result = evaluate_p2_run(run, gold_ids=gold, cutoffs=(10, 20))
-            manifest = run.manifest
-            cost = manifest.get("cost") or {}
-            item.update({
-                "planner_source": manifest.get("planner_source"),
-                "iterations": manifest.get("iterations"),
-                "candidates": len(run.papers),
-                "metrics_at_10": result["by_cutoff"]["10"],
-                "metrics_at_20": result["by_cutoff"]["20"],
-                "provider_calls": sum((cost.get("provider_calls") or {}).values()),
-                "llm_calls": cost.get("llm_calls"),
-                "total_tokens": cost.get("total_tokens"),
-                "wall_ms": cost.get("wall_ms"),
-                "errors": len(run.errors),
-            })
+            if strategy == "tree":
+                tree_result = tree_runner.run(question)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                for name, payload in (("papers", {"papers": tree_result["papers"]}), ("nodes", tree_result["nodes"]), ("edges", tree_result["edges"]), ("stats", tree_result["stats"]), ("errors", tree_result["errors"])):
+                    (run_dir / f"{name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                (run_dir / "run_manifest.json").write_text(json.dumps({"schema_version": "search_tree_run.v1", "query": question, "stop_reason": tree_result["stop_reason"], "stats": tree_result["stats"]}, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                result = evaluate_p2_run({"papers": tree_result["papers"]}, gold_ids=gold, cutoffs=(10, 20))
+                cost = tree_result.get("stats") or {}
+                item.update({
+                    "planner_source": cost.get("planner_source"),
+                    "iterations": cost.get("levels"),
+                    "candidates": len(tree_result["papers"]),
+                    "metrics_at_10": result["by_cutoff"]["10"],
+                    "metrics_at_20": result["by_cutoff"]["20"],
+                    "provider_calls": cost.get("provider_calls"),
+                    "llm_calls": cost.get("llm_calls"),
+                    "total_tokens": None,
+                    "wall_ms": cost.get("wall_ms"),
+                    "stop_reason": tree_result.get("stop_reason"),
+                    "errors": len(tree_result.get("errors") or []),
+                })
+            else:
+                run = pipeline.run(question, output_dir=run_dir)
+                result = evaluate_p2_run(run, gold_ids=gold, cutoffs=(10, 20))
+                manifest = run.manifest
+                cost = manifest.get("cost") or {}
+                item.update({
+                    "planner_source": manifest.get("planner_source"),
+                    "iterations": manifest.get("iterations"),
+                    "candidates": len(run.papers),
+                    "metrics_at_10": result["by_cutoff"]["10"],
+                    "metrics_at_20": result["by_cutoff"]["20"],
+                    "provider_calls": sum((cost.get("provider_calls") or {}).values()),
+                    "llm_calls": cost.get("llm_calls"),
+                    "total_tokens": cost.get("total_tokens"),
+                    "wall_ms": cost.get("wall_ms"),
+                    "errors": len(run.errors),
+                })
         except Exception as exc:  # 单题失败不终止整批评测。
             item["error"] = f"{type(exc).__name__}: {exc}"[:200]
         per_query.append(item)
@@ -98,8 +128,9 @@ def run_pipeline_eval(
         "offset": offset,
         "limit": limit,
         "page_size": page_size,
+        "strategy": strategy,
         "excluded_sources": list(exclude_sources),
-        "execution": "live_p2_pipeline",
+        "execution": "live_p2_pipeline" if strategy == "pipeline" else "live_search_tree",
         "results": {"at_10": aggregate(10), "at_20": aggregate(20)},
         "totals": {
             "wall_ms": round((time.perf_counter() - started) * 1000, 3),
@@ -129,8 +160,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--page-size", type=int, default=10)
     parser.add_argument("--sleep", type=float, default=3.0)
+    parser.add_argument("--strategy", choices=("pipeline", "tree"), default="pipeline")
     args = parser.parse_args(argv)
-    payload = run_pipeline_eval(args.dataset, args.output, offset=args.offset, limit=args.limit, page_size=args.page_size, sleep_seconds=args.sleep)
+    payload = run_pipeline_eval(args.dataset, args.output, offset=args.offset, limit=args.limit, page_size=args.page_size, sleep_seconds=args.sleep, strategy=args.strategy)
     print(json.dumps({"output": args.output, "results": payload["results"], "totals": payload["totals"]}, ensure_ascii=False, indent=2))
     return 0
 

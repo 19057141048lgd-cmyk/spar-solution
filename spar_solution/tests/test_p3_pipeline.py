@@ -7,7 +7,7 @@ from spar_solution.src.spar_baseline.p2_pipeline import FixtureProvider
 from spar_solution.src.spar_baseline.mock_pipeline import _paper
 from spar_solution.src.spar_baseline.p3_pipeline import P3Pipeline
 from spar_solution.src.spar_baseline.query_planner import QueryPlanner
-from spar_solution.src.spar_baseline.deepseek_layer import DeepSeekCallError
+from spar_solution.src.spar_baseline.deepseek_layer import DeepSeekCallError, blend_relevance
 
 
 class FakeUnderstandingLayer:
@@ -64,7 +64,8 @@ class P3PipelineTests(unittest.TestCase):
             run = P3Pipeline({"arxiv": provider}, citation_enabled=False, understanding_layer=layer).run("WiFi heart rate monitoring", output_dir=temp)
         self.assertEqual(layer.plan_calls, 1)
         self.assertEqual(layer.judge_calls, 1)
-        self.assertAlmostEqual(run.papers[0]["scores"]["relevance"], 0.91)
+        # LLM 分(0.91)与词法分(1.0)按 blend_relevance 融合，而非原样覆盖。
+        self.assertAlmostEqual(run.papers[0]["scores"]["relevance"], blend_relevance(0.91, 1.0))
 
     def test_judge_is_batched_and_final_selection_contains_graph(self):
         class BatchLayer(FakeUnderstandingLayer):
