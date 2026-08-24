@@ -15,6 +15,12 @@ from .config import (
 )
 from .providers import BaseProvider, ProviderError, ProviderResult
 from .openalex_provider import OpenAlexProvider, TransportResponse
+from .deepseek_layer import (
+    DeepSeekCallError,
+    DeepSeekClient,
+    DeepSeekSchemaError,
+    DeepSeekUnderstandingLayer,
+)
 
 __all__ = [
     "PaperDocValidationError",
@@ -26,6 +32,10 @@ __all__ = [
     "ProviderResult",
     "OpenAlexProvider",
     "TransportResponse",
+    "DeepSeekCallError",
+    "DeepSeekClient",
+    "DeepSeekSchemaError",
+    "DeepSeekUnderstandingLayer",
     "ProviderSettings",
     "get_provider_config",
     "load_config",

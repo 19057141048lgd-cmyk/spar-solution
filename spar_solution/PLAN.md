@@ -2,7 +2,7 @@
 
 ## 0. 当前状态与交付边界
 
-本文件是后续开发会话的方案基线。P1 已形成 PaperDoc、Provider、去重、错误协议、arXiv/本地库双路和 A/B/C/D 可执行评测闭环；P2 已形成结构化查询、引用感知迭代、证据评分、停止和 artifact replay。当前 WiFi Gold 仍为 provisional、本地库仍为 mock，因此不能宣称真实效果提升。`P1_ACCEPTANCE.md` 记录已验证项、mock-only 项和阻塞项。
+本文件是后续开发会话的方案基线。P1 已形成 PaperDoc、Provider、去重、错误协议、arXiv/本地库双路和 A/B/C/D 可执行评测闭环；P2 已形成结构化查询、宽召回、DeepSeek 理解/判断、引用感知迭代、证据评分、停止和 artifact replay；P3 已形成五角色结构化消息、artifact 回放和开销统计。当前 WiFi Gold 仍为 provisional、本地库仍为 mock，因此不能宣称真实效果提升。`P1_ACCEPTANCE.md` 记录已验证项、mock-only 项和阻塞项。
 
 P2/P3 本次补充为实施级设计，但开发仍遵循 `P1 评测闭环 → P2 → P3` 的依赖顺序。本文件只规定方案和验收，不在这里伪造测试集结果。
 

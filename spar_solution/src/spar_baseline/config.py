@@ -29,6 +29,9 @@ DEFAULTS: dict[str, str] = {
     "OPENALEX_MAILTO": "",
     "SCIVERSE_API_BASE_URL": "https://api.sciverse.space",
     "SCIVERSE_API_TOKEN": "",
+    "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    "DEEPSEEK_API_KEY": "",
+    "DEEPSEEK_MODEL": "deepseek-chat",
 }
 
 _SENSITIVE_RE = re.compile(r"(?:KEY|TOKEN|PASSWORD|SECRET|AUTH|CREDENTIAL|EMAIL|MAILTO)", re.I)

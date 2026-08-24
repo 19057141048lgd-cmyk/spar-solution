@@ -213,7 +213,9 @@ class QueryPlanner:
             "missing_method": ("method", f"{topic} methods techniques algorithms"),
             "missing_dataset": ("dataset", f"{topic} datasets benchmarks"),
             "missing_time_range": ("constraint", f"{topic} publication year date"),
-            "missing_application": ("application", f"{topic} applications use cases"),
+            # query_plan.v1 没有单独的 application kind；用 comparison
+            # 保留应用场景扩展，同时让下一轮计划继续满足严格 schema。
+            "missing_application": ("comparison", f"{topic} applications use cases"),
             "citation_neighbor_gain": ("reference", f"{topic} related references citations"),
         }
         additions = []

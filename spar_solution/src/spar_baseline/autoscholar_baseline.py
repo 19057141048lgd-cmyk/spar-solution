@@ -19,6 +19,7 @@ from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 from .providers.arxiv import ArxivProvider
+from .config import load_config
 from .query_planner import QueryPlanner
 
 
@@ -96,6 +97,12 @@ def _arxiv_ids(records: list[Mapping[str, Any]]) -> list[str]:
     return ids
 
 
+def _cutoff_year(row: Mapping[str, Any]) -> int | None:
+    value = (row.get("source_meta") or {}).get("published_time") if isinstance(row.get("source_meta"), Mapping) else None
+    match = re.match(r"^(\d{4})", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
 def run_baseline(
     dataset: str | Path,
     output: str | Path,
@@ -111,7 +118,7 @@ def run_baseline(
     rows = load_rows(dataset, offset=offset, limit=limit)
     if not rows:
         raise ValueError("no dataset rows selected")
-    key = deepseek_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    key = deepseek_key or os.environ.get("DEEPSEEK_API_KEY", "") or load_config().get("DEEPSEEK_API_KEY", "")
     if not key:
         raise RuntimeError("DEEPSEEK_API_KEY is required for this comparison")
     provider = ArxivProvider()
@@ -123,8 +130,9 @@ def run_baseline(
     for index, row in enumerate(rows):
         question = str(row.get("question") or "").strip()
         qid = str(row.get("qid") or f"row_{offset + index}")
+        cutoff_year = _cutoff_year(row)
         gold = {_norm_arxiv(item) for item in row.get("answer_arxiv_id") or [] if _norm_arxiv(item)}
-        item: dict[str, Any] = {"qid": qid, "question": question, "gold_arxiv_ids": sorted(gold), "current": {}, "deepseek": {}}
+        item: dict[str, Any] = {"qid": qid, "question": question, "gold_arxiv_ids": sorted(gold), "cutoff_year": cutoff_year, "current": {}, "deepseek": {}}
         try:
             current_plan = planner.plan(question)
             current_query = str(current_plan["subqueries"][0]["query_text"])
@@ -153,7 +161,7 @@ def run_baseline(
             started = time.perf_counter()
             try:
                 calls["arxiv"] += 1
-                response = provider.search(query, page_size=page_size)
+                response = provider.search(query, page_size=page_size, cutoff_year=cutoff_year)
                 predicted = _arxiv_ids(response.records)
                 item[mode].update({"predicted_arxiv_ids": predicted, "metrics_at_10": _metric(predicted, gold), "latency_ms": round((time.perf_counter() - started) * 1000, 3), "records": len(response.records)})
             except Exception as exc:
@@ -194,4 +202,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

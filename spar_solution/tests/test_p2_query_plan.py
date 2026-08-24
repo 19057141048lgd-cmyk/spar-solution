@@ -56,6 +56,12 @@ class QueryPlanTests(unittest.TestCase):
         bounded = self.planner.next_iteration(next_plan, gaps=["missing_method"])
         self.assertEqual(len(bounded["subqueries"]), len(next_plan["subqueries"]))
 
+    def test_application_gap_uses_supported_subquery_kind(self):
+        plan = self.planner.plan("WiFi heart rate monitoring")
+        next_plan = self.planner.next_iteration(plan, gaps=["missing_application"])
+        self.assertEqual(next_plan["subqueries"][-1]["kind"], "comparison")
+        validate_query_plan(next_plan)
+
     def test_invalid_time_range_is_rejected(self):
         plan = self.planner.plan("WiFi heart rate monitoring")
         plan["time_range"] = {"start_year": 2024, "end_year": 2020}

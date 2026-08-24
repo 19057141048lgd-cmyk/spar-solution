@@ -163,7 +163,7 @@ class SourceRouter:
     select_sources = route_plan
 
 
-def _call_search(provider: Any, query: str, page_size: int) -> Any:
+def _call_search(provider: Any, query: str, page_size: int, *, search_kwargs: Mapping[str, Any] | None = None) -> Any:
     method = getattr(provider, "search", None)
     if not callable(method):
         raise ProviderError(_source_name(provider), "config", "provider has no search method")
@@ -171,11 +171,33 @@ def _call_search(provider: Any, query: str, page_size: int) -> Any:
         parameters = inspect.signature(method).parameters
     except (TypeError, ValueError):
         parameters = {}
-    if "page_size" in parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
-        return method(query, page_size=page_size)
-    if "per_page" in parameters:
-        return method(query, per_page=page_size)
-    return method(query)
+    kwargs = dict(search_kwargs or {})
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+    if accepts_kwargs:
+        kwargs["page_size"] = page_size
+    elif "page_size" in parameters:
+        kwargs["page_size"] = page_size
+    elif "per_page" in parameters:
+        kwargs["per_page"] = page_size
+    else:
+        kwargs.pop("page_size", None)
+    if not accepts_kwargs:
+        kwargs = {key: value for key, value in kwargs.items() if key in parameters}
+    return method(query, **kwargs)
+
+
+def _plan_time_range(plan: Any) -> dict[str, int]:
+    """提取可传给支持时间过滤 Provider 的年份边界。"""
+
+    value = _value(plan, "time_range", default={})
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, int] = {}
+    for key in ("start_year", "end_year"):
+        year = value.get(key)
+        if isinstance(year, int) and not isinstance(year, bool):
+            result[key] = year
+    return result
 
 
 def _result_records(provider: Any, result: Any) -> list[dict[str, Any]]:
@@ -235,6 +257,7 @@ class RecallRunner:
 
     def run(self, plan: Any, *, iteration: int = 0, max_calls: int | None = None) -> RecallResult:
         routes = self.router.route_plan(plan)
+        search_kwargs = _plan_time_range(plan)
         budget = self.max_calls if max_calls is None else max_calls
         if budget is not None:
             if budget < 0:
@@ -246,7 +269,7 @@ class RecallRunner:
         def execute(index: int, route: RouteDecision) -> tuple[int, list[dict[str, Any]], dict[str, Any] | None, dict[str, Any]]:
             started = perf_counter()
             try:
-                records = _result_records(route.provider, _call_search(route.provider, route.query, self.page_size))
+                records = _result_records(route.provider, _call_search(route.provider, route.query, self.page_size, search_kwargs=search_kwargs))
                 prepared: list[dict[str, Any]] = []
                 for record in records:
                     item = dict(record)

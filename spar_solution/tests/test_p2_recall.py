@@ -26,6 +26,16 @@ class _Provider:
         return ProviderResult(self.name, "search", [paper], total=1)
 
 
+class _TimeAwareProvider(_Provider):
+    def __init__(self, name):
+        super().__init__(name)
+        self.year_filters = []
+
+    def search(self, query, *, page_size=10, start_year=None, end_year=None):
+        self.year_filters.append((start_year, end_year))
+        return super().search(query, page_size=page_size)
+
+
 class RecallTests(unittest.TestCase):
     def test_router_honors_source_constraint_and_skips_unavailable(self):
         available = _Provider("arxiv")
@@ -72,6 +82,15 @@ class RecallTests(unittest.TestCase):
         result = RecallRunner(SourceRouter([one, two]), max_calls=1).run({"subqueries": [{"query": "a"}, {"query": "b"}]})
         self.assertEqual(result.stats["api_calls"], 1)
         self.assertEqual(len(one.calls) + len(two.calls), 1)
+
+    def test_runner_passes_plan_time_range_to_compatible_provider(self):
+        provider = _TimeAwareProvider("arxiv")
+        result = RecallRunner(SourceRouter([provider])).run({
+            "time_range": {"start_year": 2020, "end_year": 2024},
+            "subqueries": [{"query": "wifi", "sources": ["arxiv"]}],
+        })
+        self.assertEqual(result.stats["api_calls"], 1)
+        self.assertEqual(provider.year_filters, [(2020, 2024)])
 
 
 if __name__ == "__main__":

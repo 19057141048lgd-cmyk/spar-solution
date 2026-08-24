@@ -11,3 +11,6 @@ id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,n
 10,执行 P2 mock 自测与 AutoScholar 小样本,DONE,无 Key 可运行并保存结果和限制说明,python -m spar_solution.src.spar_baseline.p2_cli fixture --output spar_solution/artifacts/p2/self-test,2026-08-24T18:35:00+08:00,0,enabled/disabled fixture 与前20条 AutoScholar 回归通过
 11,全新 Agent 独立验收,DONE,未参与开发的 Agent 只读测试并给出问题清单,python -m unittest discover -s spar_solution/tests -v,2026-08-24T18:35:00+08:00,0,全新只读 Agent PASS；94 tests
 12,完成 P2 Git 版本,DONE,全量测试和安全检查通过且 Git 提交可定位,git status --short,2026-08-24T18:35:00+08:00,0,提交在所有 staged 检查通过后创建
+13,修复 arXiv 宽召回与时间过滤,DONE,短语/OR 召回、时间边界和未来论文过滤有测试,python -m unittest spar_solution.tests.test_arxiv_provider spar_solution.tests.test_p2_recall -v,2026-08-24T19:00:00+08:00,0,减少自然语言整句 AND 导致的零召回
+14,接入 DeepSeek 理解与候选判断,DONE,结构化计划、逐篇判断、显式错误和规则回退,python -m unittest spar_solution.tests.test_deepseek_layer spar_solution.tests.test_p2_pipeline -v,2026-08-24T19:20:00+08:00,0,unknown 保留，明确 fail 才排除；密钥不落盘
+15,执行 WiFi 与 AutoScholar 优化 smoke,DONE,真实配置 smoke 和公开样本回归均有 manifest 与限制说明,python -m spar_solution.src.spar_baseline.p2_cli fixture --output spar_solution/artifacts/p2/self-test-optimized,2026-08-24T19:30:00+08:00,0,fixture 可回放；真实 WiFi smoke 记录 DeepSeek/OpenAlex/arXiv 状态

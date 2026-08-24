@@ -22,6 +22,8 @@ from .p2_stop import StopController, StopDecision
 from .providers.base import ProviderError, ProviderResult
 from .query_plan import QueryPlanValidationError, validate_query_plan
 from .query_planner import QueryPlanner
+from .deepseek_layer import DeepSeekCallError, DeepSeekSchemaError, DeepSeekUnderstandingLayer
+from .p2_evidence import ConstraintResult, ConstraintVerdict
 
 
 def _jsonable(value: Any) -> Any:
@@ -102,20 +104,28 @@ class P2Run:
 class P2Pipeline:
     """执行固定 P2 流程：计划、召回、去重、门控、证据、评分、引用、停止。"""
 
-    def __init__(self, providers: Mapping[str, Any] | Iterable[Any], *, citation_provider: Mapping[str, Any] | Iterable[Any] | None = None, citation_enabled: bool = True, page_size: int = 10, max_workers: int = 4) -> None:
+    def __init__(self, providers: Mapping[str, Any] | Iterable[Any], *, citation_provider: Mapping[str, Any] | Iterable[Any] | None = None, citation_enabled: bool = True, page_size: int = 10, max_workers: int = 4, understanding_layer: DeepSeekUnderstandingLayer | None = None) -> None:
         self.providers = providers
         self.citation_providers = citation_provider if citation_provider is not None else providers
         self.citation_enabled = bool(citation_enabled)
         self.page_size = page_size
         self.max_workers = max_workers
         self.planner = QueryPlanner()
+        self.understanding_layer = understanding_layer
         self.gate = ConstraintGate()
         self.scorer = Scorer()
 
     def run(self, query: str, *, output_dir: str | Path | None = None) -> P2Run:
+        errors: list[dict[str, Any]] = []
         plan = self.planner.plan(query)
-        run = P2Run(query=query, query_plan=plan.to_dict())
+        if self.understanding_layer is not None:
+            try:
+                plan = self.understanding_layer.plan(query)
+            except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
+                errors.append({"source": "deepseek", "code": getattr(exc, "code", "plan_fallback"), "message": str(exc)[:200], "stage": "plan"})
+        run = P2Run(query=query, query_plan=plan.to_dict(), errors=errors)
         seen: list[dict[str, Any]] = []
+        deepseek_judge_batches = 0
         previous_new: list[int] = []
         stop_controller = StopController.from_query_plan(plan)
         citation_depth = 0
@@ -147,10 +157,26 @@ class P2Pipeline:
             constraints: list[Any] = []
             evidence_items: list[Any] = []
             scored: list[dict[str, Any]] = []
+            judgements: dict[str, dict[str, Any]] = {}
+            if self.understanding_layer is not None and seen:
+                try:
+                    for start in range(0, min(len(seen), 12)):
+                        deepseek_judge_batches += 1
+                        judgements.update({str(item["paper_id"]): item for item in self.understanding_layer.judge(plan, seen[start:start + 1])})
+                except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
+                    run.errors.append({"source": "deepseek", "code": getattr(exc, "code", "judge_fallback"), "message": str(exc)[:200], "stage": "judge"})
             for paper in seen:
                 constraint = self.gate.evaluate(plan, paper)
+                judgement = judgements.get(str(paper.get("paper_id")))
+                if judgement is not None:
+                    state = str(judgement.get("hard_constraint_state") or "unknown")
+                    if state == "fail":
+                        constraint = ConstraintVerdict(state="fail", results=constraint.results + (ConstraintResult("deepseek", "explicit", "fail", "deepseek_explicit_fail"),), reason_codes=constraint.reason_codes + ("deepseek_explicit_fail",))
+                    elif state == "unknown" and constraint.state == "pass":
+                        constraint = ConstraintVerdict(state="unknown", results=constraint.results, reason_codes=constraint.reason_codes + ("deepseek_unknown",))
                 items = EvidenceLoader().load(paper, required_status="abstract")
-                verdict = self.scorer.score(paper, plan, constraint, items)
+                overrides = {"relevance": judgement["relevance_score"]} if judgement is not None else None
+                verdict = self.scorer.score(paper, plan, constraint, items, component_overrides=overrides)
                 scored.append(_annotate(paper, verdict, constraint, items))
                 constraints.append(constraint)
                 evidence_items.extend(items)
@@ -175,7 +201,9 @@ class P2Pipeline:
                     paper.setdefault("provenance", {})["query_id"] = plan["query_id"]
                     constraint = self.gate.evaluate(plan, paper)
                     items = EvidenceLoader().load(paper, required_status="abstract")
-                    verdict = self.scorer.score(paper, plan, constraint, items)
+                    judgement = judgements.get(str(paper.get("paper_id")))
+                    overrides = {"relevance": judgement["relevance_score"]} if judgement is not None else None
+                    verdict = self.scorer.score(paper, plan, constraint, items, component_overrides=overrides)
                     scored_children.append(_annotate(paper, verdict, constraint, items))
                     for evidence_item in items:
                         evidence_dict = evidence_item.to_dict()
@@ -204,7 +232,7 @@ class P2Pipeline:
             run.stops.append(decision.to_dict())
             if decision.should_stop:
                 break
-        run.manifest = {"schema_version": "p2_run.v1", "query": query, "query_id": plan["query_id"], "citation_enabled": self.citation_enabled, "generated_at": datetime.now(timezone.utc).isoformat(), "iterations": len(run.recall), "status": "degraded" if run.errors else "ok"}
+        run.manifest = {"schema_version": "p2_run.v1", "query": query, "query_id": plan["query_id"], "citation_enabled": self.citation_enabled, "deepseek_judge_batches": deepseek_judge_batches, "generated_at": datetime.now(timezone.utc).isoformat(), "iterations": len(run.recall), "status": "degraded" if run.errors else "ok"}
         if output_dir is not None:
             self.write_artifacts(run, output_dir)
         return run

@@ -79,12 +79,34 @@ def _find(entry: ElementTree.Element, name: str) -> ElementTree.Element | None:
 
 
 def _search_expression(query: str) -> str:
-    """把用户短查询转成 arXiv 可执行的字段 AND 表达式。"""
+    """把自然语言查询转成宽召回的 arXiv 表达式。
 
-    terms = re.findall(r"[\w]+(?:[-'][\w]+)?", query, flags=re.UNICODE)
-    if not terms:
+    Provider 层不应把用户问题强制收紧为全词 ``AND``。复杂问题由上层
+    QueryPlanner 拆成多个变体；单个变体这里使用短语和 ``OR``，再由后续
+    去重、重排和约束判断恢复精度。只允许安全的词和短语进入表达式，避免
+    把用户输入当作 arXiv 查询语法执行。
+    """
+
+    phrases = [item.strip() for item in re.findall(r'"([^"\r\n]+)"', query) if item.strip()]
+    remainder = re.sub(r'"[^"\r\n]+"', " ", query)
+    terms = re.findall(r"[\w]+(?:[-'][\w]+)?", remainder, flags=re.UNICODE)
+    clauses: list[str] = []
+    for phrase in phrases[:4]:
+        words = re.findall(r"[\w]+(?:[-'][\w]+)?", phrase, flags=re.UNICODE)
+        if words:
+            clauses.append(f'all:"{" ".join(words[:8])}"')
+    clauses.extend(f"all:{term}" for term in terms[:12] if term.casefold() not in {"and", "or"})
+    if not clauses:
         raise ProviderError("arxiv", "config", "query must contain searchable terms")
-    return " AND ".join(f"all:{term}" for term in terms[:12])
+    return "(" + " OR ".join(clauses) + ")"
+
+
+def _validate_year(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1900 <= value <= 2200:
+        raise ProviderError("arxiv", "config", f"{name} must be a four-digit year")
+    return value
 
 
 class ArxivProvider:
@@ -122,6 +144,9 @@ class ArxivProvider:
         cursor: str | None = None,
         per_page: int | None = None,
         page: int | None = None,
+        start_year: int | None = None,
+        end_year: int | None = None,
+        cutoff_year: int | None = None,
         **_: Any,
     ) -> ProviderResult:
         if not isinstance(query, str) or not query.strip():
@@ -138,7 +163,21 @@ class ArxivProvider:
             page = 1
         if isinstance(page, bool) or not isinstance(page, int) or page < 1:
             raise ProviderError(self.source, "config", "page must be a positive integer")
-        params = {"search_query": _search_expression(query), "start": (page - 1) * size, "max_results": size}
+        start = _validate_year(start_year, "start_year")
+        end = _validate_year(end_year, "end_year")
+        cutoff = _validate_year(cutoff_year, "cutoff_year")
+        if cutoff is not None:
+            end = min(end, cutoff) if end is not None else cutoff
+        if start is not None and end is not None and start > end:
+            raise ProviderError(self.source, "config", "start_year must not exceed end_year")
+        expression = _search_expression(query)
+        date_filter = None
+        if start is not None or end is not None:
+            lower = f"{start or 1900}01010000"
+            upper = f"{end or 2200}12312359"
+            date_filter = f"submittedDate:[{lower} TO {upper}]"
+            expression = f"{expression} AND {date_filter}"
+        params = {"search_query": expression, "start": (page - 1) * size, "max_results": size}
         url = f"{self.base_url}&{urlencode(params)}" if "?" in self.base_url else f"{self.base_url}?{urlencode(params)}"
         try:
             response = _normalise_response(self.transport("GET", url, {"Accept": "application/atom+xml", "User-Agent": "spar-p1/arxiv"}, self.timeout))
@@ -157,17 +196,31 @@ class ArxivProvider:
         query_id = "q_" + hashlib.sha256(query.strip().encode("utf-8")).hexdigest()[:16]
         retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         records = [self._to_paper_doc(entry, query_id=query_id, page=page, retrieved_at=retrieved_at) for entry in root.findall(f"{{{_ATOM}}}entry")]
+        # API 日期过滤用于减少网络返回；本地再次过滤，防止供应商/fixture忽略查询条件。
+        filtered_out = 0
+        if start is not None or end is not None:
+            kept: list[dict[str, Any]] = []
+            for record in records:
+                year = ((record.get("bibliography") or {}).get("year"))
+                if isinstance(year, int) and (start is None or year >= start) and (end is None or year <= end):
+                    kept.append(record)
+                else:
+                    filtered_out += 1
+            records = kept
         total_node = root.find(f"{{{_OPENSEARCH}}}totalResults")
         try:
             total = int(_text(total_node)) if total_node is not None else None
         except ValueError:
             total = None
+        reported_total = total if total is not None else len(records)
+        if date_filter and total is not None:
+            reported_total = max(0, total - filtered_out)
         return ProviderResult(
             self.source,
             "search",
             records,
-            total=total if total is not None else len(records),
-            provenance={"endpoint": self.base_url, "page": page, "page_size": size, "execution_status": "live"},
+            total=reported_total,
+            provenance={"endpoint": self.base_url, "page": page, "page_size": size, "execution_status": "live", "query_expression": expression, "date_filter": date_filter, "filtered_out": filtered_out},
         )
 
     def read(self, paper_id: str, *, cursor: str | None = None, **_: Any) -> ProviderResult:

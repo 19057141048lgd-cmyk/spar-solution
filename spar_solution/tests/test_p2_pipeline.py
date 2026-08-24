@@ -3,7 +3,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spar_solution.src.spar_baseline.p2_pipeline import replay_p2, run_p2_fixture
+from spar_solution.src.spar_baseline.p2_pipeline import FixtureProvider, P2Pipeline, replay_p2, run_p2_fixture
+from spar_solution.src.spar_baseline.mock_pipeline import _paper
+from spar_solution.src.spar_baseline.query_planner import QueryPlanner
+
+
+class FakeUnderstandingLayer:
+    def plan(self, query):
+        return QueryPlanner().plan(query)
+
+    def judge(self, plan, papers):
+        return [{"paper_id": item["paper_id"], "relevance_score": 0.93, "relevance_label": "relevant", "hard_constraint_state": "pass", "reason": "fixture", "evidence_needed": [], "confidence": 0.9} for item in papers]
 
 
 class P2PipelineTests(unittest.TestCase):
@@ -44,6 +54,14 @@ class P2PipelineTests(unittest.TestCase):
             evidence.unlink()
             with self.assertRaises(ValueError):
                 replay_p2(directory)
+
+    def test_optional_deepseek_layer_overrides_relevance_without_replacing_provider(self):
+        paper = _paper("arxiv", "WiFi CSI heart rate monitoring")
+        paper["paper_id"] = "fixture:p2:deepseek"
+        provider = FixtureProvider("arxiv", [paper], {})
+        run = P2Pipeline({"arxiv": provider}, citation_enabled=False, understanding_layer=FakeUnderstandingLayer()).run("WiFi heart rate monitoring")
+        self.assertTrue(run.papers)
+        self.assertAlmostEqual(run.papers[0]["scores"]["relevance"], 0.93)
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@
 ## Non-Goals
 
 - 本次不修改 SPAR、YFR、smartsearch 或其他原仓库源代码。
-- 本次不调用真实学术 API，不验证真实 Key 的效果。
-- 本次不实现五 Agent，不做最终比赛 UI 或完整论文综述。
+- 真实 API 只允许使用本地测试配置或临时环境变量，密钥不得进入 Git、日志或 artifact。
+- P3 fixture 不替代真实 Gold；没有 Gold 时不声称效果提升，不做最终比赛 UI 或完整论文综述。
 
 ## Constraints
 
@@ -30,6 +30,6 @@
 
 ## Done-When
 
-- [ ] P1、P2、P3 的子任务全部通过各自验收。
-- [ ] PaperDoc 和 Agent 协议保持向后兼容。
-- [ ] mock、contract、live-smoke 和消融指标均有 artifact 记录。
+- [x] P1、P2、P3 的子任务全部通过各自独立验收。
+- [x] PaperDoc 和 Agent 协议保持向后兼容。
+- [x] mock、contract、live-smoke 和消融指标均有 artifact 记录。

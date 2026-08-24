@@ -1,4 +1,4 @@
 id,task,task_type,status,depends_on,task_dir,acceptance_criteria,validation_command,completed_at,retry_count,notes
 1,P1：可运行基线、PaperDoc、安全数据层和检索评测协议,single-full,DONE,,tasks/p1,A/B/C/D 四模式、身份匹配、provisional Gold、指标、WiFi 四查询 artifact 和安全验收全部通过,python -m unittest discover -s spar_solution/tests -v,2026-08-24T17:30:00+08:00,0,评测协议已实现并验收；不进入 P2/P3
 2,P2：查询分解、引用感知迭代和可解释重排序,single-full,DONE,1,tasks/p2,查询树/引用图/分量评分/StopDecision 可回放并通过消融,python -m unittest discover -s spar_solution/tests -v,2026-08-24T18:35:00+08:00,0,Agent Team 完成；94 tests 与全新只读 Agent 独立验收 PASS
-3,P3：五 Agent 结构化圆桌、评测闭环和竞赛封装,single-full,TODO,2,tasks/p3,五 Agent 协议、artifact 重放、指标和 token/字节对比完成,待 P2 完成后执行,,0,不得提前进入 P3
+3,P3：五 Agent 结构化圆桌、评测闭环和竞赛封装,single-full,DONE,2,tasks/p3,五 Agent 协议、artifact 重放、指标和 token/字节对比完成,python -m unittest spar_solution.tests.test_p3_protocol spar_solution.tests.test_p3_pipeline spar_solution.tests.test_p3_metrics -v,2026-08-24T20:10:00+08:00,0,代码、定向测试和全新只读 Agent 验收完成；提交已准备

@@ -4,11 +4,11 @@
 
 - **任务**：制定 SPAR 三阶段融合方案并初始化后续项目空间
 - **形态**：epic
-- **进度**：P1、P2 已完成；P3 未开始
-- **当前**：P2 结构化查询/引用/证据/停止流水线已验收；P3 保持 TODO
-- **文件**：`spar_solution/src/spar_baseline/`、`spar_solution/tests/`、`.codex-tasks/20260824-spar-integration/tasks/p1/TODO.csv`
-- **验证**：94 tests passed；compileall、secret scan、artifact replay 和全新只读 Agent 验收通过
-- **下一步**：不得提前进入 P3；等待新的 P3 明确任务
+- **进度**：P1、P2、P3 代码和独立验收已完成；Git 提交已准备
+- **当前**：P2 已加入宽召回和 DeepSeek 理解/判断层；P3 已加入五角色结构化消息与 artifact 回放
+- **文件**：`spar_solution/src/spar_baseline/`、`spar_solution/tests/`、`.codex-tasks/20260824-spar-integration/tasks/`
+- **验证**：118 tests、compileall、secret scan、P2/P3 fixture/replay 和全新只读 Agent 验收通过
+- **下一步**：创建并核对本轮 Git 提交
 
 ## Session Start
 
