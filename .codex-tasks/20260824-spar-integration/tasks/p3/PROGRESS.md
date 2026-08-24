@@ -1,10 +1,10 @@
 # P3 进度日志
 
-- **状态**：P3 修复开发完成，独立只读验收通过，待最终 Git 提交确认
+- **状态**：P3 修复开发完成，独立只读验收通过，Git 版本已提交
 - **范围**：五角色 JSON/JSONL 协议、artifact store、P3 fixture、引用消融、消息开销统计
 - **当前**：已补两轮 NEXT_QUERY、批量 Judge、冲突复核、统一 identity、P3 replay 和竞赛格式最终输出；未修改 `repos/`，未读取或写入密钥
 - **已验证**：P3 定向测试 15 项通过；全量测试 174 项通过；compileall 通过
-- **已完成**：全新 Agent 只读验收、全量回归、fixture/replay、通信对照、Git 提交前检查
+- **已完成**：全新 Agent 只读验收、全量回归、fixture/replay、通信对照、Git 提交前检查、Git 提交 `88e8ae1`
 - **限制**：当前 P3 结果是 fixture/协议验证，不等于真实 Gold 效果提升
 - **独立验收**：`/root/p3_fresh_acceptance_20260825` 未参与修改；174/174 tests、compileall、两套 fixture replay、证据和 final_selection 篡改拒绝均通过
 
