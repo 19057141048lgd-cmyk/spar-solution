@@ -52,6 +52,26 @@ def normalize_title(value: Any) -> str | None:
     return " ".join(value.split()) or None
 
 
+_ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+)$", re.IGNORECASE)
+
+
+def arxiv_id_from_doi(value: Any) -> str | None:
+    """Recognise the deterministic arXiv DOI prefix and return the arXiv ID.
+
+    arXiv registers every preprint as ``10.48550/arxiv.<id>``; providers such
+    as OpenAlex expose that DOI without a separate arXiv ID field. Records that
+    only differ in this representation are the same paper and must match.
+    """
+
+    doi = normalize_doi(value)
+    if not doi:
+        return None
+    match = _ARXIV_DOI_RE.match(doi)
+    if not match:
+        return None
+    return normalize_arxiv_id(match.group(1))
+
+
 def _normalize_stable_id(field: str, value: Any) -> str | None:
     value = _text(value)
     if not value:
@@ -107,6 +127,17 @@ def match_papers(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str,
                 return _result("matched", field, f"{field}:{left_value}", f"same_{field}")
             return _result("ambiguous", None, None, f"conflicting_{field}")
 
+    # arXiv preprint DOIs are equivalent to arXiv IDs. OpenAlex-sourced records
+    # usually only carry the DOI, while AutoScholarQuery-style gold only carries
+    # the bare arXiv ID; without this rule those pairs fall through to title
+    # matching and count as ambiguous (not TP) even when both sides exist.
+    left_arxiv = normalize_arxiv_id(left_ids.get("arxiv_id")) or arxiv_id_from_doi(left_ids.get("doi"))
+    right_arxiv = normalize_arxiv_id(right_ids.get("arxiv_id")) or arxiv_id_from_doi(right_ids.get("doi"))
+    if left_arxiv and right_arxiv:
+        if left_arxiv == right_arxiv:
+            return _result("matched", "arxiv_doi_equivalence", f"arxiv_id:{left_arxiv}", "doi_arxiv_equivalent")
+        return _result("ambiguous", None, None, "conflicting_arxiv_identity")
+
     stable_matches: list[tuple[str, str]] = []
     stable_conflicts: list[str] = []
     for field in STABLE_ID_FIELDS:
@@ -149,6 +180,7 @@ def match_papers(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str,
 __all__ = [
     "MatchStatus",
     "STABLE_ID_FIELDS",
+    "arxiv_id_from_doi",
     "match_papers",
     "normalize_arxiv_id",
     "normalize_doi",

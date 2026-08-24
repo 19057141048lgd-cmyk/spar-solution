@@ -10,7 +10,7 @@ import re
 import unicodedata
 from typing import Any
 
-from .identity import normalize_arxiv_id, normalize_doi
+from .identity import arxiv_id_from_doi, normalize_arxiv_id, normalize_doi
 
 
 SCHEMA_VERSION = "paperdoc.v1"
@@ -122,6 +122,11 @@ def canonical_paper_key(doc: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             if field == "doi":
                 value = normalize_doi(value)
+                # arXiv preprint DOI 和 arXiv ID 必须生成同一把合并键，
+                # 否则 arXiv 源与 OpenAlex 源的同一篇论文会被当作两条记录。
+                derived_arxiv = arxiv_id_from_doi(value)
+                if derived_arxiv:
+                    return f"arxiv_id:{_norm_text(derived_arxiv)}"
             elif field == "arxiv_id":
                 value = normalize_arxiv_id(value)
             elif field == "openalex_id":

@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from .identity import arxiv_id_from_doi
 from .paperdoc import validate_paper_doc
 from .providers.base import ProviderError, ProviderResult
 
@@ -539,6 +540,9 @@ class OpenAlexProvider:
     ) -> dict[str, Any]:
         openalex_id = _normalise_openalex_id(record.get("id"))
         doi = _normalise_doi(record.get("doi"))
+        # arXiv 预印本在 OpenAlex 只有 DOI 形态；反填 arxiv_id 使身份匹配、
+        # 去重和 arXiv-ID Gold 都能直接命中。
+        arxiv_id = arxiv_id_from_doi(doi)
         abstract, abstract_warnings = _reconstruct_abstract(record.get("abstract_inverted_index"))
         if doi:
             paper_id = f"doi:{doi}"
@@ -598,7 +602,7 @@ class OpenAlexProvider:
             "paper_id": paper_id,
             "identifiers": {
                 "doi": doi,
-                "arxiv_id": None,
+                "arxiv_id": arxiv_id,
                 "s2_id": None,
                 "openalex_id": openalex_id,
                 "pmid": None,
