@@ -201,7 +201,7 @@ class QueryPlanner:
             "hard_constraints": hard,
             "soft_constraints": soft,
             "source_capabilities": ["arxiv", "openalex", "bohrium", "local_library"],
-            "budget": {"max_iterations": 2, "max_citation_depth": 1, "max_subqueries_per_gap": 2, "max_provider_calls": 20, "max_llm_calls": 10},
+            "budget": {"max_iterations": 2, "max_citation_depth": 1, "max_subqueries_per_gap": 2, "max_provider_calls": 20, "max_llm_calls": 10, "max_judge_candidates": 20},
             "stop_strategy": {"min_new_relevant": 2, "min_subquery_coverage": 0.8, "min_evidence_coverage": 0.7},
             "subqueries": subqueries,
             "gaps": gaps,

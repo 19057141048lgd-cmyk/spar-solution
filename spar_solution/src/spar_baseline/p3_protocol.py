@@ -35,6 +35,15 @@ _MESSAGE_SENDERS = {
     "STOP_DECISION": {"arbiter"},
     "FINAL_SELECTION": {"arbiter"},
 }
+_MESSAGE_RECEIVERS = {
+    "QUERY_PLAN": {"retriever"},
+    "SEARCH_ACTION": {"retriever", "orchestrator", "arbiter"},
+    "RESULT_BATCH": {"citation_explorer"},
+    "RELATION_BATCH": {"evidence_judge"},
+    "EVIDENCE_VERDICT": {"arbiter"},
+    "STOP_DECISION": {"orchestrator", "system"},
+    "FINAL_SELECTION": {"orchestrator", "system"},
+}
 _RELATION_TYPES = {"references", "citations", "related_works"}
 _VERDICT_TYPES = {"relevant", "irrelevant", "uncertain", "degraded"}
 _STOP_ACTIONS = {"STOP", "NEXT_QUERY", "FINAL_SELECTION"}
@@ -276,22 +285,28 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
                 raise P3ProtocolError("relation depth must be 0 or 1")
     elif kind == "EVIDENCE_VERDICT":
         _require_id(payload.get("query_id"), "payload.query_id")
-        _require_id(payload.get("paper_id"), "payload.paper_id")
-        verdict = _require_string(payload.get("verdict"), "payload.verdict", max_length=32)
-        if verdict not in _VERDICT_TYPES:
-            raise P3ProtocolError(f"unsupported verdict: {verdict}")
-        state = _require_string(payload.get("constraint_state"), "payload.constraint_state", max_length=16)
-        if state not in {"pass", "fail", "unknown"}:
-            raise P3ProtocolError("invalid constraint_state")
-        _require_number(payload.get("confidence"), "payload.confidence")
-        refs = _require_list(payload.get("evidence_refs"), "payload.evidence_refs")
-        for index, ref in enumerate(refs):
-            validate_artifact_ref(ref, field=f"payload.evidence_refs[{index}]")
-        scores = payload.get("component_scores")
-        if not isinstance(scores, Mapping):
-            raise P3ProtocolError("payload.component_scores must be an object")
-        for field in ("relevance", "constraint", "evidence", "quality", "citation", "novelty"):
-            _require_number(scores.get(field), f"payload.component_scores.{field}")
+        if payload.get("verdicts_ref") is not None:
+            validate_artifact_ref(payload["verdicts_ref"], field="payload.verdicts_ref")
+            count = payload.get("candidate_count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise P3ProtocolError("payload.candidate_count must be a non-negative integer")
+        else:
+            _require_id(payload.get("paper_id"), "payload.paper_id")
+            verdict = _require_string(payload.get("verdict"), "payload.verdict", max_length=32)
+            if verdict not in _VERDICT_TYPES:
+                raise P3ProtocolError(f"unsupported verdict: {verdict}")
+            state = _require_string(payload.get("constraint_state"), "payload.constraint_state", max_length=16)
+            if state not in {"pass", "fail", "unknown"}:
+                raise P3ProtocolError("invalid constraint_state")
+            _require_number(payload.get("confidence"), "payload.confidence")
+            refs = _require_list(payload.get("evidence_refs"), "payload.evidence_refs")
+            for index, ref in enumerate(refs):
+                validate_artifact_ref(ref, field=f"payload.evidence_refs[{index}]")
+            scores = payload.get("component_scores")
+            if not isinstance(scores, Mapping):
+                raise P3ProtocolError("payload.component_scores must be an object")
+            for field in ("relevance", "constraint", "evidence", "quality", "citation", "novelty"):
+                _require_number(scores.get(field), f"payload.component_scores.{field}")
     elif kind == "STOP_DECISION":
         _require_id(payload.get("query_id"), "payload.query_id")
         action = _require_string(payload.get("action"), "payload.action", max_length=32)
@@ -300,7 +315,12 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         _require_string(payload.get("reason_code"), "payload.reason_code", max_length=64)
     elif kind == "FINAL_SELECTION":
         _require_id(payload.get("query_id"), "payload.query_id")
-        for index, row in enumerate(_require_list(payload.get("selections"), "payload.selections")):
+        if payload.get("selection_ref") is not None:
+            validate_artifact_ref(payload["selection_ref"], field="payload.selection_ref")
+        if payload.get("relation_graph_ref") is not None:
+            validate_artifact_ref(payload["relation_graph_ref"], field="payload.relation_graph_ref")
+        selections = payload.get("selections", [])
+        for index, row in enumerate(_require_list(selections, "payload.selections")):
             if not isinstance(row, Mapping):
                 raise P3ProtocolError(f"payload.selections[{index}] must be an object")
             _require_id(row.get("paper_id"), f"payload.selections[{index}].paper_id")
@@ -336,6 +356,8 @@ def validate_message(message: Mapping[str, Any]) -> dict[str, Any]:
         raise P3ProtocolError("unknown sender or receiver")
     if message["sender"] not in _MESSAGE_SENDERS[message_type]:
         raise P3ProtocolError(f"{message_type} cannot be emitted by {message['sender']}")
+    if message["receiver"] not in _MESSAGE_RECEIVERS[message_type]:
+        raise P3ProtocolError(f"{message_type} cannot be delivered to {message['receiver']}")
     if not isinstance(message["seq"], int) or isinstance(message["seq"], bool) or message["seq"] < 0:
         raise P3ProtocolError("message.seq must be a non-negative integer")
     if message.get("diagnostic_code") is not None and message.get("diagnostic_code") not in DIAGNOSTIC_CODES:

@@ -70,7 +70,7 @@ def _deduplicate(records: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, A
     return output, errors
 
 
-def _annotate(doc: dict[str, Any], verdict: EvidenceVerdict, constraint: Any, evidence: list[Any]) -> dict[str, Any]:
+def _annotate(doc: dict[str, Any], verdict: EvidenceVerdict, constraint: Any, evidence: list[Any], *, stage: str = "p2") -> dict[str, Any]:
     item = deepcopy(doc)
     item.setdefault("scores", {}).update({**verdict.component_scores, "final": verdict.final_score, "confidence": verdict.confidence})
     item.setdefault("status", {}).update({"hard_constraints_pass": constraint.passed, "evidence_status": verdict.evidence_status})
@@ -81,9 +81,73 @@ def _annotate(doc: dict[str, Any], verdict: EvidenceVerdict, constraint: Any, ev
             evidence_ids.append(str(evidence_item.evidence_id))
         elif isinstance(evidence_item, Mapping) and evidence_item.get("evidence_id"):
             evidence_ids.append(str(evidence_item["evidence_id"]))
-    item.setdefault("provenance", {}).setdefault("p2", {})["evidence_ids"] = evidence_ids
+    item.setdefault("provenance", {}).setdefault(stage, {})["evidence_ids"] = evidence_ids
     validate_paper_doc(item)
     return item
+
+
+def _prepare_papers(
+    papers: Iterable[Mapping[str, Any]],
+    plan: Mapping[str, Any],
+    gate: ConstraintGate,
+    scorer: Scorer,
+) -> dict[str, tuple[dict[str, Any], ConstraintVerdict, list[Any], float]]:
+    """Prepare fresh PaperDocs for either P2 or P3 judging."""
+
+    loader = EvidenceLoader()
+    prepared: dict[str, tuple[dict[str, Any], ConstraintVerdict, list[Any], float]] = {}
+    for raw in papers:
+        paper = deepcopy(dict(raw))
+        paper_id = str(paper.get("paper_id") or "")
+        if not paper_id:
+            continue
+        constraint = gate.evaluate(plan, paper)
+        evidence = loader.load(paper, required_status="abstract")
+        preliminary = scorer.preliminary_relevance(paper, plan)
+        paper.setdefault("status", {})["hard_constraints_pass"] = constraint.passed
+        paper.setdefault("scores", {})["relevance"] = preliminary
+        prepared[paper_id] = (paper, constraint, evidence, preliminary)
+    return prepared
+
+
+def _apply_prepared_scores(
+    prepared: Mapping[str, tuple[dict[str, Any], ConstraintVerdict, list[Any], float]],
+    judgements: Mapping[str, Mapping[str, Any]],
+    plan: Mapping[str, Any],
+    scorer: Scorer,
+    *,
+    stage: str = "p2",
+    unavailable_ids: Iterable[str] = (),
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Shared PaperDoc annotation path for P2/P3 judge outputs."""
+
+    judged: list[dict[str, Any]] = []
+    verdicts: list[dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
+    unavailable = {str(item) for item in unavailable_ids}
+    for paper_id, (paper, constraint, items, _) in prepared.items():
+        judgement = judgements.get(paper_id)
+        if judgement is not None:
+            state = str(judgement.get("hard_constraint_state") or "unknown")
+            if state == "fail":
+                constraint = ConstraintVerdict(state="fail", results=constraint.results + (ConstraintResult("deepseek", "explicit", "fail", "deepseek_explicit_fail"),), reason_codes=constraint.reason_codes + ("deepseek_explicit_fail",))
+            elif state == "unknown" and constraint.state == "pass":
+                constraint = ConstraintVerdict(state="unknown", results=constraint.results, reason_codes=constraint.reason_codes + ("deepseek_unknown",))
+        overrides = {"relevance": judgement["relevance_score"]} if judgement is not None else None
+        verdict = scorer.score(paper, plan, constraint, items, component_overrides=overrides)
+        if paper_id in unavailable:
+            verdict = replace(verdict, warnings=tuple(dict.fromkeys((*verdict.warnings, "llm_judge_unavailable"))))
+        annotated = _annotate(paper, verdict, constraint, items, stage=stage)
+        annotated.setdefault("provenance", {})["query_id"] = plan["query_id"]
+        if judgement is not None:
+            annotated.setdefault("provenance", {}).setdefault(stage, {})["llm_judgement"] = {key: judgement.get(key) for key in ("relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
+        judged.append(annotated)
+        verdict_dict = verdict.to_dict()
+        if judgement is not None:
+            verdict_dict["llm_judgement"] = {key: judgement.get(key) for key in ("relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
+        verdicts.append(verdict_dict)
+        evidence.extend(item.to_dict() if hasattr(item, "to_dict") else dict(item) for item in items)
+    return judged, verdicts, evidence
 
 
 @dataclass

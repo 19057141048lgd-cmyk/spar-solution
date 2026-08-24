@@ -269,7 +269,8 @@ class RecallRunner:
         def execute(index: int, route: RouteDecision) -> tuple[int, list[dict[str, Any]], dict[str, Any] | None, dict[str, Any]]:
             started = perf_counter()
             try:
-                records = _result_records(route.provider, _call_search(route.provider, route.query, self.page_size, search_kwargs=search_kwargs))
+                raw_result = _call_search(route.provider, route.query, self.page_size, search_kwargs=search_kwargs)
+                records = _result_records(route.provider, raw_result)
                 prepared: list[dict[str, Any]] = []
                 for record in records:
                     item = dict(record)
@@ -279,7 +280,8 @@ class RecallRunner:
                     provenance["parent_node_id"] = route.parent_node_id
                     prepared.append(item)
                 call_iteration = route.iteration if route.iteration else iteration
-                call = {"subquery_id": route.subquery_id, "source": route.source, "query": route.query, "records": len(prepared), "ok": True, "latency_ms": round((perf_counter() - started) * 1000, 3), "iteration": call_iteration}
+                internal_calls = int(getattr(raw_result, "provenance", {}).get("api_calls") or 1) if isinstance(getattr(raw_result, "provenance", {}), Mapping) else 1
+                call = {"subquery_id": route.subquery_id, "source": route.source, "query": route.query, "records": len(prepared), "ok": True, "api_calls": internal_calls, "latency_ms": round((perf_counter() - started) * 1000, 3), "iteration": call_iteration}
                 return index, prepared, None, call
             except Exception as exc:
                 error = _safe_error(route.source, exc)

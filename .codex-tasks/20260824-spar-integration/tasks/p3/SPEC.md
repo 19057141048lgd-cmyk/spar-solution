@@ -35,3 +35,12 @@ Planner → Retriever → CitationExplorer → EvidenceJudge → Arbiter
 - 输出至少包含候选数、选择数、错误数、消息字节数/估算 token 数，并能比较结构化消息的开销。
 - P2 全量测试保持通过；compileall、git diff --check、secret scan 和全新只读 Agent 验收通过后才创建 P3 Git 提交。
 - 真实 Gold 缺失时不得声称 F1 或效果提升；只能报告 fixture/真实 smoke 的可执行性和限制。
+
+## P3 修复补充（2026-08-25）
+
+- 圆桌必须至少运行两轮：首轮 `STOP_DECISION.action=NEXT_QUERY` 时由 `QueryPlanner.next_iteration()` 根据 gap 产生带 `parent_id/iteration` 的下一轮子查询；达到预算后记录 `MAX_ITERATION`。
+- `EvidenceJudge` 对未被硬约束排除的词法初排候选做批量判断，单轮最多一次批量调用；规则分与模型分差值大于 0.25 时，Arbiter 触发一次批量复核并在 verdict artifact 记录 `conflict_reviewed`。
+- `EVIDENCE_VERDICT` 必须引用包含全部候选 verdict 的 artifact；`STOP_DECISION`、`FINAL_SELECTION` 的接收方固定为 `orchestrator`，不得发给自身。
+- 最终选择必须是 `spar.final.v1`，包含标题、年份、venue、分区（`high/partial/reserve`）、六项分数、证据引用和关系图。
+- P3 replay 必须读取 `protocol.jsonl`、manifest、final_selection 和 evidence_ref，不能只验证文件存在。
+- P3 指标复用 P1 `identity.match_papers`；对照必须支持 P2/P3、citation enabled/disabled、structured/long-text communication，并同时报告 Recall/F1、延迟、Provider/LLM 调用和 Token。

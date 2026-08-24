@@ -145,6 +145,16 @@ class Scorer:
             reason_codes=tuple(dict.fromkeys(reasons)), warnings=warnings,
         )
 
+    def preliminary_relevance(self, paper_doc: Mapping[str, Any], query_plan: Mapping[str, Any]) -> float:
+        """Return the deterministic pre-judge relevance feature.
+
+        P3 uses this public method to select a bounded judge batch. Keeping the
+        feature behind the Scorer API prevents the pipeline from depending on
+        private scoring implementation details.
+        """
+
+        return self._relevance(paper_doc, query_plan)
+
     @staticmethod
     def _evidence_status(doc: Mapping[str, Any], items: Sequence[Mapping[str, Any]]) -> str:
         order = {name: index for index, name in enumerate(("unavailable", "metadata", "abstract", "partial_text", "fulltext"))}

@@ -24,6 +24,11 @@ def _papers(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _citations(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     value = payload.get("citation") or payload.get("citations") or []
+    if isinstance(value, Mapping):
+        rounds = value.get("rounds")
+        if isinstance(rounds, list):
+            return [item for item in rounds if isinstance(item, Mapping)]
+        return [value]
     return [item for item in value if isinstance(item, Mapping)]
 
 

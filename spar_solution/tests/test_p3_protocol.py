@@ -28,6 +28,14 @@ class P3ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(validate_message(message)["type"], "QUERY_PLAN")
 
+    def test_arbiter_decisions_go_to_orchestrator(self):
+        for message_type, payload in (
+            ("STOP_DECISION", {"query_id": "q1", "action": "NEXT_QUERY", "reason_code": "CONTINUE"}),
+            ("FINAL_SELECTION", {"query_id": "q1", "selections": [], "selection_ref": "arbiter/final.json", "relation_graph_ref": "arbiter/graph.json"}),
+        ):
+            message = make_message(run_id="run1", message_id=f"m-{message_type}", message_type=message_type, sender="arbiter", receiver="orchestrator", seq=1, payload=payload, payload_ref="arbiter/final.json")
+            self.assertEqual(validate_message(message)["receiver"], "orchestrator")
+
 
 if __name__ == "__main__":
     unittest.main()

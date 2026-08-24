@@ -1,7 +1,7 @@
 id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes
-1,实现 P3 五角色消息协议,DONE,消息类型/角色/路径/长度校验及 JSONL 回放,python -m unittest spar_solution.tests.test_p3_protocol -v,2026-08-24T19:40:00+08:00,0,只传短字段和 artifact_ref
-2,实现 P3 五角色流水线,DONE,Planner/Retriever/CitationExplorer/EvidenceJudge/Arbiter 可运行,python -m unittest spar_solution.tests.test_p3_pipeline -v,2026-08-24T19:45:00+08:00,0,fixture 无 Key；引用可消融
-3,实现 P3 指标与开销统计,DONE,候选/选择/错误/消息字节和 token 估算可输出,python -m unittest spar_solution.tests.test_p3_metrics -v,2026-08-24T19:45:00+08:00,0,结果写入 metrics artifact
-4,执行 P3 fixture 与 replay,DONE,enabled/disabled 两套 artifact 可读取且协议消息合法,python -m unittest spar_solution.tests.test_p3_protocol spar_solution.tests.test_p3_pipeline spar_solution.tests.test_p3_metrics -v,2026-08-24T19:50:00+08:00,0,真实 API 未在 P3 fixture 中伪造
-5,全新 Agent 独立验收,DONE,只读 Agent 全量测试/安全检查/fixture replay 通过,python -m unittest discover -s spar_solution/tests -v,2026-08-24T20:05:00+08:00,0,全新只读 Agent PASS；118 tests；未修改文件
-6,提交 P3 Git 版本,DONE,独立验收和 staged diff check 通过后可定位提交,git status --short,2026-08-24T20:10:00+08:00,0,本提交不包含 repos、本地配置或密钥
+1,实现 P3 五角色消息协议,DONE,消息类型/角色/路径/长度校验及 JSONL 回放,python -m unittest spar_solution.tests.test_p3_protocol -v,2026-08-25T10:00:00+08:00,0,补充 receiver 语义和全量 verdict/selection artifact 引用
+2,实现 P3 五角色流水线,DONE,Planner/Retriever/CitationExplorer/EvidenceJudge/Arbiter 可运行,python -m unittest spar_solution.tests.test_p3_pipeline -v,2026-08-25T10:00:00+08:00,0,两轮 NEXT_QUERY/仲裁复核/批量 judge/最终关系图
+3,实现 P3 指标与开销统计,DONE,候选/选择/错误/消息字节和 token 估算可输出,python -m unittest spar_solution.tests.test_p3_metrics -v,2026-08-25T10:00:00+08:00,0,复用 P1 identity，增加 P2/P3 与结构化/长文本对照接口
+4,执行 P3 fixture 与 replay,DONE,enabled/disabled 两套 artifact 可读取且协议消息合法,python -m unittest spar_solution.tests.test_p3_protocol spar_solution.tests.test_p3_pipeline spar_solution.tests.test_p3_metrics -v,2026-08-25T10:00:00+08:00,0,replay_p3 校验 manifest/protocol/final/evidence_ref
+5,全新 Agent 独立验收,DONE,只读 Agent 全量测试/安全检查/fixture replay 通过,python -m unittest discover -s spar_solution/tests -v,2026-08-25T18:00:00+08:00,0,174 tests；两套 fixture replay、协议内容一致性、证据和 final_selection 篡改拒绝通过
+6,提交 P3 Git 版本,DONE,独立验收和 staged diff check 通过后可定位提交,git status --short,2026-08-25T18:05:00+08:00,0,提交前已执行 staged diff check；不包含 repos、本地配置或密钥

@@ -126,6 +126,8 @@ def validate_query_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         _nonnegative_int(plan["budget"].get(field), f"budget.{field}")
     if "max_llm_calls" in plan["budget"]:
         _nonnegative_int(plan["budget"]["max_llm_calls"], "budget.max_llm_calls")
+    if "max_judge_candidates" in plan["budget"]:
+        _nonnegative_int(plan["budget"]["max_judge_candidates"], "budget.max_judge_candidates")
     if not isinstance(plan["stop_strategy"], Mapping):
         raise QueryPlanValidationError("stop_strategy must be an object")
     for field in ("min_new_relevant",):
