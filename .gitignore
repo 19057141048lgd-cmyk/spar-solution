@@ -25,3 +25,9 @@ build/
 
 # 临时任务原始抓取物
 .codex-tasks/*/raw/*
+
+# 外部参考仓库与本地工具（不入库）
+repos/
+.firecrawl/
+tools/
+santai_extracted.txt
