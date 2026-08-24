@@ -15,16 +15,43 @@
 from __future__ import annotations
 
 import json
+import re
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping
 
 from .deepseek_layer import DeepSeekCallError, DeepSeekSchemaError
 from .p2_citation import _child_id, _nested_paper, _relation_call, _relation_type
-from .p2_pipeline import _deduplicate
+from .p2_pipeline import _deduplicate, _group_by_source
 from .p2_recall import RecallRunner, SourceRouter
 from .p2_scoring import Scorer
 from .paperdoc import validate_paper_doc
-from .query_planner import QueryPlanner
+from .query_planner import QueryPlanner, _clean_query
+from .rank_fusion import rrf_fuse
+
+
+_QUESTION_SHELL_RE = re.compile(
+    r"(can you|could you|tell me|papers? about|studies? that|are there|what papers|"
+    r"any resources|any studies|list (?:of|the) papers|i want|looking for|\?)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_query(text: str) -> str:
+    """把送进 Provider 的检索式洗净：剥掉疑问壳/礼貌词。
+
+    真实运行中 LLM 计划偶尔原样回显完整问句（"Can you tell me some papers
+    about ..."），直接进 arXiv/OpenAlex 会返回大量错领域垃圾并饿死整棵树
+    （见 autoscholar/tree-n10 的 test_0/test_9）。只清洗"像问句"的查询
+    （含疑问壳或超过 6 个词），关键词式短查询原样放行以保留大小写。
+    """
+
+    text = str(text or "").strip()
+    if not text:
+        return text
+    if len(text.split()) <= 6 and not _QUESTION_SHELL_RE.search(text):
+        return text
+    cleaned = _clean_query(text)
+    return cleaned if len(cleaned.split()) >= 2 else text
 
 
 # 层停止原因（枚举字符串）；判断优先级与 run() 内的检查顺序一致。
@@ -173,6 +200,70 @@ class SearchTreeRunner:
     # 查询生成
     # ------------------------------------------------------------------
 
+    def _rephrase_queries(
+        self,
+        query: str,
+        searched_norm: set[str],
+        base_plan: Mapping[str, Any] | None,
+        lexical_plan: Mapping[str, Any] | None,
+        errors: list[dict[str, Any]],
+        level: int,
+    ) -> list[str]:
+        """垃圾池重写：第 0 层无高相关论文时，让 LLM 换术语重写检索式。
+
+        与 _generate_deep_queries 的区别：不从已找到论文派生（垃圾池没有
+        可派生的对象），而是要求模型换角度/换术语/更具体地重述问题。
+        失败退规则 gap 模板。
+        """
+
+        layer = self.understanding_layer
+        client = getattr(layer, "client", None)
+        if layer is not None and self._llm_budget_left() and callable(getattr(client, "complete_json", None)):
+            system = (
+                "You are an academic literature search expert. The previous queries retrieved "
+                "nothing relevant. Rephrase the question into short retrieval queries using "
+                "DIFFERENT terminology, more specific technical terms, and remove any "
+                "conversational phrasing. Return JSON only: "
+                '{"queries": [{"query_text": "..."}]}. Never invent paper facts.'
+            )
+            user = json.dumps(
+                {
+                    "task": "rephrase_query",
+                    "query": query,
+                    "searched_queries": sorted(searched_norm),
+                    "required": {"queries": "1-2 objects, each with a short keyword-style query_text"},
+                },
+                ensure_ascii=False,
+            )
+            try:
+                payload = self._call_llm(lambda: client.complete_json(system, user, max_tokens=400))
+                fresh = [
+                    str(item.get("query_text") or item.get("query") or "").strip()
+                    for item in (payload.get("queries") or [])
+                    if isinstance(item, Mapping)
+                ]
+                fresh = [text for text in fresh if text and _norm_query(text) not in searched_norm]
+                if fresh:
+                    return fresh[: self.queries_per_level]
+            except _LLM_ERRORS as exc:
+                errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "rephrase_fallback")), "message": str(exc)[:200], "stage": f"rephrase_L{level}"})
+        # 规则兜底：计划里未被搜过的其他子查询，或 gap 模板。
+        fallback_plan = lexical_plan or base_plan
+        if fallback_plan is not None:
+            texts = [
+                str(item.get("query_text") or "").strip()
+                for item in (fallback_plan.get("subqueries") or [])
+                if isinstance(item, Mapping)
+            ]
+            texts = [text for text in texts if text and _norm_query(text) not in searched_norm]
+            if texts:
+                return texts[: self.queries_per_level]
+        try:
+            evolved = self.planner.next_iteration(fallback_plan) if fallback_plan is not None else None
+        except Exception:
+            evolved = None
+        return _plan_queries(evolved, self.queries_per_level) if evolved is not None else []
+
     def _generate_deep_queries(
         self,
         query: str,
@@ -312,6 +403,10 @@ class SearchTreeRunner:
                 level_queries = texts
         if not level_queries:
             level_queries = _plan_queries(base_plan, self.queries_per_level) or [query.strip()]
+        # 任何来源的第 0 层查询（LLM 回显问句/规则兜底）都必须先净化。
+        level_queries = list(dict.fromkeys(_sanitize_query(text) for text in level_queries if _sanitize_query(text)))
+        if not level_queries:
+            level_queries = [_sanitize_query(query)]
 
         judge_plan = base_plan.to_dict() if hasattr(base_plan, "to_dict") else dict(base_plan)
         stop_reason = STOP_MAX_DEPTH
@@ -320,11 +415,17 @@ class SearchTreeRunner:
             # -- 1. 本层查询（第 0 层已在上方生成；深层查询由 top 论文派生）--
             if level:
                 relevant_pool = [paper for paper in pool if _relevance_of(paper) >= self.relevance_threshold]
-                relevant_pool.sort(key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
-                unused = [paper for paper in relevant_pool if str(paper.get("paper_id")) not in query_seed_ids]
-                top_papers = (unused or relevant_pool)[:2]
-                query_seed_ids.update(str(paper.get("paper_id")) for paper in top_papers)
-                level_queries = self._generate_deep_queries(query, top_papers, searched_norm, base_plan, lexical_plan, errors, level)
+                if relevant_pool:
+                    relevant_pool.sort(key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
+                    unused = [paper for paper in relevant_pool if str(paper.get("paper_id")) not in query_seed_ids]
+                    top_papers = (unused or relevant_pool)[:2]
+                    query_seed_ids.update(str(paper.get("paper_id")) for paper in top_papers)
+                    level_queries = self._generate_deep_queries(query, top_papers, searched_norm, base_plan, lexical_plan, errors, level)
+                else:
+                    # 垃圾池二 chance：第 0 层没有任何高相关论文时，换术语重写
+                    # 查询再搜一层，而不是直接 no_relevant_papers 停死。
+                    level_queries = self._rephrase_queries(query, searched_norm, base_plan, lexical_plan, errors, level)
+                level_queries = [_sanitize_query(text) for text in level_queries]
             level_queries = [
                 text
                 for text in level_queries
@@ -344,15 +445,22 @@ class SearchTreeRunner:
                 {"subquery_id": f"st_L{level}_{index:02d}", "query_text": text, "iteration": level}
                 for index, text in enumerate(level_queries)
             ]
-            recall = self.recall_runner.run(plan_nodes, iteration=level, max_calls=remaining)
+            # 第 0 层加宽一倍（首次召回决定整棵树的种子质量），并做 RRF 融合。
+            recall = (
+                RecallRunner(self.recall_runner.router, max_workers=self.recall_runner.max_workers, page_size=self.page_size * 2)
+                .run(plan_nodes, iteration=level, max_calls=remaining)
+                if level == 0
+                else self.recall_runner.run(plan_nodes, iteration=level, max_calls=remaining)
+            )
             provider_calls += int(recall.stats.get("api_calls", 0))
             search_calls += int(recall.stats.get("api_calls", 0))
             errors.extend(dict(error, stage=f"recall_L{level}") for error in recall.source_errors)
             searched_norm.update(_norm_query(text) for text in level_queries)
             subquery_map = {node["subquery_id"]: node for node in plan_nodes}
+            fresh_records = rrf_fuse(_group_by_source(recall.records)) if recall.records else []
 
             # -- 3. 合并去重（P1 身份规则）并标记 search_node --
-            merged, dedup_errors = _deduplicate([*pool, *recall.records])
+            merged, dedup_errors = _deduplicate([*pool, *fresh_records])
             errors.extend(dict(error, stage=f"dedup_L{level}") for error in dedup_errors)
             pool = merged
             pool_ids = {str(paper.get("paper_id")) for paper in pool}
@@ -396,6 +504,19 @@ class SearchTreeRunner:
             # -- 5. 引用扩展：高相关论文按分取前 docs_to_expand 篇 --
             candidates = [paper for paper in pool if _relevance_of(paper) >= self.relevance_threshold and str(paper.get("paper_id")) not in expanded_ids]
             candidates.sort(key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
+            if not candidates:
+                # 兜底种子：没有 >=0.75 的论文时，只要池子大体在题（最高分
+                # >=0.3）且有摘要，就取融合分 top-3 扩引用，避免引用链饿死；
+                # 最高分连 0.3 都不到说明池子整体错领域，不浪费调用。
+                best_effort = [
+                    paper
+                    for paper in pool
+                    if _relevance_of(paper) >= 0.3
+                    and str((paper.get("bibliography") or {}).get("abstract") or "").strip()
+                    and str(paper.get("paper_id")) not in expanded_ids
+                ]
+                best_effort.sort(key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
+                candidates = best_effort[:3]
             candidates = candidates[: self.docs_to_expand]
             citation_calls = 0
             child_records: list[dict[str, Any]] = []
