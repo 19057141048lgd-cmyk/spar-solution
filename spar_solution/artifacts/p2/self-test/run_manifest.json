@@ -1,11 +1,35 @@
 {
   "citation_enabled": true,
+  "cost": {
+    "completion_tokens": 0,
+    "llm_calls": 0,
+    "llm_failures": 0,
+    "per_stage_ms": {
+      "citation": 1.019,
+      "evidence": 0.731,
+      "judge": 0.0,
+      "plan": 0.0,
+      "recall": 3.191
+    },
+    "prompt_tokens": 0,
+    "provider_calls": {
+      "arxiv": 6
+    },
+    "total_tokens": 0,
+    "wall_ms": 12.991
+  },
+  "deepseek_judge_batches": 0,
+  "deepseek_status": "unavailable",
   "evidence_files": [
     "evidence/fixture_child/fixture_child_abstract.txt",
     "evidence/fixture_seed/fixture_seed_abstract.txt"
   ],
-  "generated_at": "2026-08-24T11:06:12.575015+00:00",
-  "iterations": 1,
+  "generated_at": "2026-08-24T15:42:29.509761+00:00",
+  "iterations": 2,
+  "planner_source": "rules",
+  "providers": [
+    "arxiv"
+  ],
   "query": "WiFi heart rate monitoring",
   "query_id": "qplan_fa7a58db8602",
   "schema_version": "p2_run.v1",

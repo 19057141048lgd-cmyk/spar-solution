@@ -48,7 +48,7 @@ OpenAlex WiFi live smoke 已成功返回结构化论文（本次复核返回 3 �
 
 - `python -m unittest discover -s spar_solution/tests -v`
 - `python -m compileall -q spar_solution/src spar_solution/tests`
-- 全量测试结果：60 passed。
+- 历史快照：60 passed（已过期，仅保留审计记录）。当前本轮全量测试结果以改进验收报告为准。
 - arXiv live smoke：四个 WiFi 查询均按真实 API 请求执行；返回数量受 arXiv 语料覆盖影响，未写入 A-D fixture Gold。
 - 目标范围 secret scan：不得出现真实 API key、Bearer 值或 `.env.local` 内容。
 - 根及查询 artifact 文件清单检查。
@@ -58,3 +58,10 @@ OpenAlex WiFi live smoke 已成功返回结构化论文（本次复核返回 3 �
 1. LocalLibrary 没有真实路径或接口，只能保持 `mock`/`unavailable`。
 2. Gold 仍为 provisional，不能宣称 A/B/C/D 的真实优劣。
 3. P1 的 D 仅为确定性元数据排序；语义重排、查询迭代、引用扩展属于 P2，未实现。
+
+## 2026-08-24 改进复核
+
+- B 批改动完成时执行全量测试：131 项通过；该数字是本次复核快照，不替代后续最终验收记录。
+- P2 的 MRR 已由 `p2_metrics.py` 提供，并与 Precision/Recall/F1 共用 `metrics.py` 的论文身份匹配规则。
+- Token/LLM 成本计量已落地到 P2 manifest；P1 fixture 不产生 LLM token，因此 P1 仍不宣称真实效率提升。
+- 旧版 arXiv 全词 AND 查询生成的 Recall=0 产物不作为有效基线；以 A-4 重建的可复现 smoke 为准。

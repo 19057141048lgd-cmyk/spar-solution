@@ -3,25 +3,36 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+import re
 from typing import Any
 
-
-def _paper_id(item: Mapping[str, Any]) -> str:
-    return str(item.get("paper_id") or "")
+from .metrics import evaluate_at_k
 
 
-def _f1(precision: float, recall: float) -> float:
-    return round(2 * precision * recall / (precision + recall), 6) if precision + recall else 0.0
+def _identity_record(item: str | Mapping[str, Any]) -> dict[str, Any]:
+    """把旧式字符串 ID 补成可供统一 identity 层匹配的最小记录。"""
 
-
-def _cutoff(papers: list[Mapping[str, Any]], gold: set[str], k: int) -> dict[str, Any]:
-    predicted = {_paper_id(item) for item in papers[:k] if _paper_id(item)}
-    tp = len(predicted & gold)
-    fp = len(predicted - gold)
-    fn = len(gold - predicted)
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
-    return {"k": k, "tp": tp, "fp": fp, "fn": fn, "precision": round(precision, 6), "recall": round(recall, 6), "f1": _f1(precision, recall)}
+    record = dict(item) if isinstance(item, Mapping) else {"paper_id": str(item)}
+    paper_id = str(record.get("paper_id") or "").strip()
+    identifiers = dict(record.get("identifiers") or {})
+    lowered = paper_id.casefold()
+    if lowered.startswith("doi:"):
+        identifiers["doi"] = identifiers.get("doi") or paper_id[4:]
+    elif lowered.startswith("arxiv:"):
+        identifiers["arxiv_id"] = identifiers.get("arxiv_id") or paper_id[6:]
+    elif lowered.startswith("openalex:"):
+        identifiers["openalex_id"] = identifiers.get("openalex_id") or paper_id[9:]
+    elif re.fullmatch(r"10\.\d{4,9}/\S+", paper_id, flags=re.IGNORECASE):
+        identifiers["doi"] = identifiers.get("doi") or paper_id
+    elif re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", paper_id, flags=re.IGNORECASE):
+        identifiers["arxiv_id"] = identifiers.get("arxiv_id") or paper_id
+    elif re.fullmatch(r"W\d+", paper_id, flags=re.IGNORECASE):
+        identifiers["openalex_id"] = identifiers.get("openalex_id") or paper_id
+    elif paper_id:
+        # P2 旧 artifact 的 fixture/local paper_id 视作来源稳定 ID，保持旧签名兼容。
+        identifiers["unique_id"] = identifiers.get("unique_id") or paper_id
+    record["identifiers"] = identifiers
+    return record
 
 
 def _run_stats(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -30,24 +41,36 @@ def _run_stats(run: Mapping[str, Any]) -> dict[str, Any]:
     recall_calls = sum((list(item.get("calls") or []) for item in recall), [])
     citation_calls = sum((list(item.get("calls") or []) for item in citation), [])
     calls = [*recall_calls, *citation_calls]
+    manifest = run.get("manifest") or run.get("run_manifest") or {}
+    cost = (manifest if isinstance(manifest, Mapping) else {}).get("cost") or run.get("cost") or {}
+    cost = cost if isinstance(cost, Mapping) else {}
     return {
-        "api_calls": sum(1 for call in calls if call.get("ok") is not None),
-        "recall_api_calls": len(recall_calls),
-        "citation_api_calls": len(citation_calls),
-        "successful_calls": sum(1 for call in calls if call.get("ok") is True),
+        "api_calls": sum(int(call.get("api_calls") or 1) for call in calls if call.get("ok") is not None),
+        "recall_api_calls": sum(int(call.get("api_calls") or 1) for call in recall_calls),
+        "citation_api_calls": sum(int(call.get("api_calls") or 1) for call in citation_calls),
+        "successful_calls": sum(int(call.get("api_calls") or 1) for call in calls if call.get("ok") is True),
         "source_errors": len(run.get("errors") or []),
         "latency_ms": round(sum(float(call.get("latency_ms") or 0) for call in calls), 3),
         "citation_edges": sum(len(item.get("edges") or []) for item in citation),
         "citation_papers": sum(len(item.get("papers") or []) for item in citation),
+        "provider_calls": dict(cost.get("provider_calls") or {}),
+        "llm_calls": int(cost.get("llm_calls") or 0),
+        "prompt_tokens": int(cost.get("prompt_tokens") or 0),
+        "completion_tokens": int(cost.get("completion_tokens") or 0),
+        "total_tokens": int(cost.get("total_tokens") or 0),
+        "llm_failures": int(cost.get("llm_failures") or 0),
+        "wall_ms": float(cost.get("wall_ms") or 0),
+        "per_stage_ms": dict(cost.get("per_stage_ms") or {}),
     }
 
 
-def evaluate_p2_run(run: Mapping[str, Any] | Any, *, gold_ids: Iterable[str] = (), cutoffs: tuple[int, ...] = (10, 20)) -> dict[str, Any]:
-    """计算单个 P2 run 的检索、证据、引用和成本指标。"""
+def evaluate_p2_run(run: Mapping[str, Any] | Any, *, gold_ids: Iterable[str | Mapping[str, Any]] = (), cutoffs: tuple[int, ...] = (10, 20)) -> dict[str, Any]:
+    """使用统一 identity 规则计算单个 P2 run 的检索、证据、引用和成本指标。"""
     payload = run.to_dict() if hasattr(run, "to_dict") else dict(run)
-    papers = list((payload.get("papers") or {}).get("papers", [])) if isinstance(payload.get("papers"), Mapping) else list(payload.get("papers") or [])
-    gold = {str(item) for item in gold_ids if str(item)}
-    by_cutoff = {str(k): _cutoff(papers, gold, k) for k in cutoffs}
+    raw_papers = list((payload.get("papers") or {}).get("papers", [])) if isinstance(payload.get("papers"), Mapping) else list(payload.get("papers") or [])
+    papers = [_identity_record(item) for item in raw_papers]
+    gold = [_identity_record(item) for item in gold_ids if isinstance(item, Mapping) or str(item).strip()]
+    by_cutoff = {str(k): evaluate_at_k(papers, gold, k=k, provider_errors=payload.get("errors") or []) for k in cutoffs}
     verdicts = list(payload.get("verdicts") or [])
     evidence = list(payload.get("evidence") or [])
     citation = list(payload.get("citation") or payload.get("citations") or [])
@@ -61,11 +84,10 @@ def evaluate_p2_run(run: Mapping[str, Any] | Any, *, gold_ids: Iterable[str] = (
     citation_covered_ids = {str(edge.get("parent_paper_id")) for item in citation for edge in item.get("edges") or []}
     citation_coverage = len(citation_covered_ids) / max(1, len(papers))
     mrr = 0.0
-    if gold:
-        for rank, paper in enumerate(papers, 1):
-            if _paper_id(paper) in gold:
-                mrr = 1.0 / rank
-                break
+    if gold and papers:
+        full_ranking = evaluate_at_k(papers, gold, k=len(papers))
+        if full_ranking["matches"]:
+            mrr = 1.0 / (min(item["prediction_index"] for item in full_ranking["matches"]) + 1)
     return {"papers": len(papers), "verdicts": len(verdicts), "by_cutoff": by_cutoff, "mrr": round(mrr, 6), "citation_coverage": round(min(1.0, citation_coverage), 6), "evidence_coverage": round(min(1.0, evidence_coverage), 6), "stats": {**_run_stats(payload), "citation_edges": edges}}
 
 

@@ -110,33 +110,43 @@ class StopController:
             "evidence_coverage": evidence_coverage,
             "budget_exhausted": bool(budget_exhausted),
         }
-        strong = []
+        # ``triggered_conditions`` is an audit trail. Citation depth limits the
+        # citation expander itself; it must not terminate the whole query loop.
+        triggered: list[str] = []
+        strong: list[str] = []
         if budget_exhausted or provider_calls >= self.thresholds["max_provider_calls"]:
+            triggered.append("BUDGET_EXHAUSTED")
             strong.append("BUDGET_EXHAUSTED")
         if provider_calls > 0 and provider_successes == 0:
+            triggered.append("ALL_PROVIDER_FAILED")
             strong.append("ALL_PROVIDER_FAILED")
         if len(new_unique_papers) >= 2 and list(new_unique_papers)[-2:] == [0, 0]:
+            triggered.append("NO_NEW_PAPER_2_ROUNDS")
             strong.append("NO_NEW_PAPER_2_ROUNDS")
-        if iteration >= self.thresholds["max_iterations"]:
+        if iteration + 1 >= self.thresholds["max_iterations"]:
+            triggered.append("MAX_ITERATION")
             strong.append("MAX_ITERATION")
         if citation_depth >= self.thresholds["max_citation_depth"]:
-            strong.append("MAX_CITATION_DEPTH")
+            triggered.append("MAX_CITATION_DEPTH")
         if strong:
             # 预算/Provider 可用性优先于循环上限，便于定位真正阻塞原因。
             priority = ["BUDGET_EXHAUSTED", "ALL_PROVIDER_FAILED", "NO_NEW_PAPER_2_ROUNDS", "MAX_ITERATION", "MAX_CITATION_DEPTH"]
             reason = next(code for code in priority if code in strong)
-            return StopDecision(True, "strong", reason, tuple(strong), measured, dict(self.thresholds))
+            return StopDecision(True, "strong", reason, tuple(triggered), measured, dict(self.thresholds))
 
-        soft = []
-        if new_relevant_papers < self.thresholds["min_new_relevant"]:
-            soft.append("LOW_RELEVANT_GAIN")
-        if subquery_coverage >= self.thresholds["min_subquery_coverage"]:
-            soft.append("SUBQUERY_COVERAGE_MET")
-        if evidence_coverage >= self.thresholds["min_evidence_coverage"]:
-            soft.append("EVIDENCE_COVERAGE_MET")
-        if len(soft) >= self.thresholds["soft_conditions_required"]:
-            return StopDecision(True, "soft", SOFT_REASON_CODE, tuple(soft), measured, dict(self.thresholds))
-        return StopDecision(False, "continue", "CONTINUE", tuple(soft), measured, dict(self.thresholds))
+        soft: list[str] = []
+        # A first round has no prior gain to compare against. Defer the soft
+        # sufficiency test until iteration 1 so query evolution is reachable.
+        if iteration >= 1:
+            if new_relevant_papers < self.thresholds["min_new_relevant"]:
+                soft.append("LOW_RELEVANT_GAIN")
+            if subquery_coverage >= self.thresholds["min_subquery_coverage"]:
+                soft.append("SUBQUERY_COVERAGE_MET")
+            if evidence_coverage >= self.thresholds["min_evidence_coverage"]:
+                soft.append("EVIDENCE_COVERAGE_MET")
+            if len(soft) >= self.thresholds["soft_conditions_required"]:
+                return StopDecision(True, "soft", SOFT_REASON_CODE, tuple(triggered + soft), measured, dict(self.thresholds))
+        return StopDecision(False, "continue", "CONTINUE", tuple(triggered + soft), measured, dict(self.thresholds))
 
 
 __all__ = ["SOFT_REASON_CODE", "STRONG_REASON_CODES", "StopController", "StopDecision"]

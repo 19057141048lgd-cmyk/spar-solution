@@ -130,14 +130,16 @@ def _string_list(value: Any, path: str, *, required: bool = False, max_items: in
 
 def _score(value: Any, path: str) -> float:
     if isinstance(value, bool):
-        return 0.5
+        raise DeepSeekSchemaError(f"{path} must be a number between 0 and 1")
     try:
         number = float(value)
-    except (TypeError, ValueError):
-        return 0.5
+    except (TypeError, ValueError) as exc:
+        raise DeepSeekSchemaError(f"{path} must be a number between 0 and 1") from exc
     if 1 < number <= 100:
         number /= 100
-    return round(number, 6) if 0 <= number <= 1 else 0.5
+    if not 0 <= number <= 1:
+        raise DeepSeekSchemaError(f"{path} must be a number between 0 and 1")
+    return round(number, 6)
 
 
 def _years(value: Any) -> dict[str, int | None]:
@@ -316,11 +318,8 @@ def _validate_judgements(response: Mapping[str, Any], expected_ids: Sequence[str
     supplied_ids = [str(item.get("paper_id")) for item in values if isinstance(item, Mapping) and item.get("paper_id")]
     if len(set(supplied_ids)) != len(supplied_ids) or any(item not in expected_ids for item in supplied_ids):
         raise DeepSeekSchemaError("results contain duplicate or unknown candidate PaperDoc")
-    if len(values) < len(expected_ids):
-        existing = set(supplied_ids)
-        values = list(values) + [{"paper_id": paper_id, "relevance_score": 0.5, "relevance_label": "uncertain", "hard_constraint_state": "unknown", "reason": "candidate was not explicitly judged", "evidence_needed": [], "confidence": 0.0} for paper_id in expected_ids if paper_id not in existing]
     if len(values) != len(expected_ids):
-        raise DeepSeekSchemaError("results contain more items than candidate PaperDocs")
+        raise DeepSeekSchemaError("results must contain exactly one item per candidate PaperDoc")
     expected = list(expected_ids)
     seen: set[str] = set()
     output: list[dict[str, Any]] = []
@@ -331,22 +330,24 @@ def _validate_judgements(response: Mapping[str, Any], expected_ids: Sequence[str
         if paper_id not in expected or paper_id in seen:
             raise DeepSeekSchemaError(f"results[{index}].paper_id does not match candidates")
         seen.add(paper_id)
-        score = item.get("relevance_score", item.get("score", item.get("relevance", 0.5)))
-        label = item.get("relevance_label") or item.get("label") or ("relevant" if float(score) >= 0.6 else "borderline")
+        score = item.get("relevance_score", item.get("score", item.get("relevance")))
+        if score is None:
+            raise DeepSeekSchemaError(f"results[{index}].relevance_score is required")
+        normalized_score = _score(score, f"results[{index}].relevance_score")
+        raw_label = item.get("relevance_label") or item.get("label")
+        label = raw_label or ("relevant" if normalized_score >= 0.6 else "borderline")
         label = {"yes": "relevant", "match": "relevant", "high": "relevant", "true": "relevant", "maybe": "borderline", "uncertain": "borderline", "no": "irrelevant", "low": "irrelevant", "false": "irrelevant"}.get(str(label).casefold(), str(label).casefold())
         if label not in JUDGEMENT_LABELS:
-            label = "borderline"
-        state = item.get("hard_constraint_state") or item.get("constraint_state") or "unknown"
-        state = {"yes": "pass", "true": "pass", "pass": "pass", "no": "fail", "false": "fail", "fail": "fail"}.get(str(state).casefold(), "unknown")
-        if label not in JUDGEMENT_LABELS:
             raise DeepSeekSchemaError(f"results[{index}].relevance_label is invalid")
+        raw_state = item.get("hard_constraint_state") or item.get("constraint_state")
+        state = "unknown" if raw_state is None else {"yes": "pass", "true": "pass", "pass": "pass", "no": "fail", "false": "fail", "fail": "fail", "unknown": "unknown"}.get(str(raw_state).casefold(), "invalid")
         if state not in CONSTRAINT_STATES:
             raise DeepSeekSchemaError(f"results[{index}].hard_constraint_state is invalid")
         raw_evidence = item.get("evidence_needed", [])
-        evidence = _string_list(raw_evidence if isinstance(raw_evidence, list) else [], f"results[{index}].evidence_needed", max_items=12)
+        evidence = _string_list(raw_evidence, f"results[{index}].evidence_needed", max_items=12)
         output.append({
             "paper_id": paper_id,
-            "relevance_score": _score(score, f"results[{index}].relevance_score"),
+            "relevance_score": normalized_score,
             "relevance_label": label,
             "hard_constraint_state": state,
             "reason": _required_string(item.get("reason") or "model judgement without additional explanation", f"results[{index}].reason", max_length=1500),
@@ -373,6 +374,24 @@ class DeepSeekClient:
             raise DeepSeekCallError("config", "timeout must be positive")
         self.transport = transport or _default_transport
         self._transport_injected = transport is not None
+        self.reset_usage()
+
+    def reset_usage(self, *, max_calls: int | None = None) -> None:
+        if max_calls is not None and (isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls < 0):
+            raise DeepSeekCallError("config", "max_calls must be a non-negative integer or null")
+        self._max_calls = max_calls
+        self._usage = {
+            "calls": 0,
+            "failures": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "latency_ms": 0.0,
+        }
+
+    @property
+    def usage(self) -> dict[str, int | float]:
+        return dict(self._usage)
 
     def complete_json(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1600) -> dict[str, Any]:
         if not self.api_key and not self._transport_injected:
@@ -382,27 +401,63 @@ class DeepSeekClient:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        started = time.perf_counter()
+        response: TransportResponse | None = None
+        for attempt in range(2):
+            if self._max_calls is not None and self._usage["calls"] >= self._max_calls:
+                raise DeepSeekCallError("budget", "LLM call budget exhausted")
+            started = time.perf_counter()
+            self._usage["calls"] += 1
+            try:
+                response = _normalise_response(self.transport("POST", endpoint, headers, body, self.timeout))
+            except DeepSeekCallError as exc:
+                self._usage["failures"] += 1
+                self._usage["latency_ms"] = round(float(self._usage["latency_ms"]) + (time.perf_counter() - started) * 1000, 3)
+                if exc.retryable and attempt == 0:
+                    continue
+                raise
+            except Exception as exc:
+                self._usage["failures"] += 1
+                self._usage["latency_ms"] = round(float(self._usage["latency_ms"]) + (time.perf_counter() - started) * 1000, 3)
+                if attempt == 0:
+                    continue
+                raise DeepSeekCallError("network", f"transport failed: {type(exc).__name__}", retryable=True) from exc
+            self._usage["latency_ms"] = round(float(self._usage["latency_ms"]) + (time.perf_counter() - started) * 1000, 3)
+            if 200 <= response.status < 300:
+                break
+            self._usage["failures"] += 1
+            retryable = response.status >= 500 or response.status == 429
+            if retryable and attempt == 0:
+                continue
+            raise DeepSeekCallError("auth" if response.status in {401, 403} else "rate" if response.status == 429 else "network", f"HTTP status {response.status}", retryable=retryable, status_code=response.status)
+        if response is None:
+            raise DeepSeekCallError("network", "DeepSeek returned no response")
         try:
-            response = _normalise_response(self.transport("POST", endpoint, headers, body, self.timeout))
+            payload = _decode_json(response.body, context="DeepSeek response")
         except DeepSeekCallError:
+            self._usage["failures"] += 1
             raise
-        except Exception as exc:
-            raise DeepSeekCallError("network", f"transport failed: {type(exc).__name__}", retryable=True) from exc
-        if not 200 <= response.status < 300:
-            raise DeepSeekCallError("auth" if response.status in {401, 403} else "rate" if response.status == 429 else "network", f"HTTP status {response.status}", retryable=response.status >= 500 or response.status == 429, status_code=response.status)
-        payload = _decode_json(response.body, context="DeepSeek response")
         if not isinstance(payload, Mapping):
+            self._usage["failures"] += 1
             raise DeepSeekCallError("parse", "DeepSeek response must be an object")
+        raw_usage = payload.get("usage")
+        if isinstance(raw_usage, Mapping):
+            prompt = raw_usage.get("prompt_tokens", 0)
+            completion = raw_usage.get("completion_tokens", 0)
+            total = raw_usage.get("total_tokens")
+            prompt = prompt if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt >= 0 else 0
+            completion = completion if isinstance(completion, int) and not isinstance(completion, bool) and completion >= 0 else 0
+            total = total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else prompt + completion
+            self._usage["prompt_tokens"] += prompt
+            self._usage["completion_tokens"] += completion
+            self._usage["total_tokens"] += total
         try:
             content = _extract_content(payload)
         except DeepSeekCallError:
+            self._usage["failures"] += 1
             raise
         if not isinstance(content, Mapping):
+            self._usage["failures"] += 1
             raise DeepSeekCallError("parse", "DeepSeek content must be a JSON object")
-        # latency is intentionally not embedded in model output; callers may log it
-        # separately without including request/response bodies or credentials.
-        _ = time.perf_counter() - started
         return dict(content)
 
 

@@ -29,6 +29,7 @@ class QueryPlanTests(unittest.TestCase):
         self.assertEqual(plan["time_range"]["start_year"], 2019)
         self.assertEqual(plan["time_range"]["end_year"], 2022)
         self.assertTrue(plan["hard_constraints"])
+        self.assertEqual(plan["hard_constraints"][0]["value"], "2019-2022")
         self.assertEqual(plan["budget"]["max_iterations"], 2)
         validate_query_plan(plan)
 
@@ -65,6 +66,13 @@ class QueryPlanTests(unittest.TestCase):
     def test_invalid_time_range_is_rejected(self):
         plan = self.planner.plan("WiFi heart rate monitoring")
         plan["time_range"] = {"start_year": 2024, "end_year": 2020}
+        with self.assertRaises(QueryPlanValidationError):
+            validate_query_plan(plan)
+
+    def test_optional_llm_budget_is_nonnegative(self):
+        plan = self.planner.plan("WiFi heart rate monitoring")
+        self.assertEqual(plan["budget"]["max_llm_calls"], 10)
+        plan["budget"]["max_llm_calls"] = -1
         with self.assertRaises(QueryPlanValidationError):
             validate_query_plan(plan)
 

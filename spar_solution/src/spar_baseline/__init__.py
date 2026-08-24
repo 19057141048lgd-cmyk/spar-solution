@@ -21,6 +21,7 @@ from .deepseek_layer import (
     DeepSeekSchemaError,
     DeepSeekUnderstandingLayer,
 )
+from .final_output import FINAL_SCHEMA, build_final_selection, validate_final_selection
 
 __all__ = [
     "PaperDocValidationError",
@@ -36,6 +37,9 @@ __all__ = [
     "DeepSeekClient",
     "DeepSeekSchemaError",
     "DeepSeekUnderstandingLayer",
+    "FINAL_SCHEMA",
+    "build_final_selection",
+    "validate_final_selection",
     "ProviderSettings",
     "get_provider_config",
     "load_config",

@@ -313,6 +313,8 @@ Provider 错误不降为论文相关性 0，而是进入错误集合；同一错
 
 每个 query 先按 DOI → arXiv ID → 稳定来源 ID → 标题+年份+首作者匹配；无法确认的记录为 `ambiguous`，不计 TP。分别计算 `P@10/R@10/F1@10`、`P@20/R@20/F1@20`、Macro-F1、Micro-F1、MRR、延迟、API 调用、Token、来源错误、去重数、证据覆盖率和引用覆盖率。
 
+现状注记（2026-08-24）：MRR 由 `p2_metrics.py` 计算，并已复用统一身份匹配；P2 已将 provider HTTP 调用、LLM 调用与 prompt/completion/total token 写入 manifest。无 Key fixture 的 token 为 0；真实 DeepSeek 未配置时不宣称真实 LLM 效率。
+
 必须保留以下消融：
 
 ```text

@@ -13,9 +13,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
+from time import perf_counter
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .paperdoc import validate_paper_doc
@@ -173,6 +175,18 @@ class OpenAlexProvider:
 
     source = "openalex"
 
+    @staticmethod
+    def relation_api_cost(paper_id: str, relation: str) -> int:
+        """Return the OpenAlex HTTP-call cost before relation expansion."""
+
+        value = str(paper_id).strip()
+        if value.casefold().startswith("openalex:"):
+            value = value.split(":", 1)[1]
+        base = {"citations": 1, "references": 2, "all": 3}.get(relation)
+        if base is None:
+            raise ValueError("relation must be references, citations or all")
+        return base if re.fullmatch(r"W\d+", value, flags=re.IGNORECASE) else base + 1
+
     def __init__(
         self,
         config: Any,
@@ -224,6 +238,58 @@ class OpenAlexProvider:
         except Exception as exc:
             raise ProviderError(self.source, "network", f"transport failed: {type(exc).__name__}") from exc
 
+    def _request_json(self, url: str) -> tuple[Mapping[str, Any], float]:
+        started = perf_counter()
+        response = self._invoke_transport(url)
+        elapsed_ms = round((perf_counter() - started) * 1000, 3)
+        if not 200 <= response.status < 300:
+            code = "auth" if response.status in {401, 403} else "rate" if response.status == 429 else "network"
+            raise ProviderError(
+                self.source,
+                code,
+                f"HTTP status {response.status}",
+                status_code=response.status,
+                retryable=response.status >= 500 or response.status == 429,
+            )
+        try:
+            raw = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, TypeError, json.JSONDecodeError) as exc:
+            raise ProviderError(self.source, "parse", "response is not valid JSON", status_code=response.status) from exc
+        if not isinstance(payload, Mapping):
+            raise ProviderError(self.source, "parse", "response JSON must be an object", status_code=response.status)
+        if payload.get("error") or payload.get("errors"):
+            raise ProviderError(self.source, "business", "OpenAlex returned an API error", status_code=response.status)
+        if "code" in payload and payload.get("code") not in (None, 0, "0"):
+            raise ProviderError(self.source, "business", "OpenAlex returned a non-zero code", status_code=response.status)
+        return payload, elapsed_ms
+
+    def _url(self, path: str, params: Mapping[str, Any] | None = None) -> str:
+        values = dict(params or {})
+        if self.api_key:
+            values["api_key"] = self.api_key
+        query = urlencode(values)
+        return f"{self.base_url}{path}" + (f"?{query}" if query else "")
+
+    def _tracked_request(
+        self, url: str, operation: str, calls: list[dict[str, Any]]
+    ) -> Mapping[str, Any]:
+        started = perf_counter()
+        try:
+            payload, latency_ms = self._request_json(url)
+        except ProviderError as exc:
+            calls.append(
+                {
+                    "operation": operation,
+                    "latency_ms": round((perf_counter() - started) * 1000, 3),
+                    "ok": False,
+                    "error_code": exc.code,
+                }
+            )
+            raise
+        calls.append({"operation": operation, "latency_ms": latency_ms, "ok": True})
+        return payload
+
     def search(
         self,
         query: str,
@@ -232,6 +298,8 @@ class OpenAlexProvider:
         cursor: str | None = None,
         per_page: int | None = None,
         page: int | None = None,
+        start_year: int | None = None,
+        end_year: int | None = None,
         **_: Any,
     ) -> ProviderResult:
         """Search ``/works`` and return a structured ProviderResult."""
@@ -253,47 +321,33 @@ class OpenAlexProvider:
         if page is not None and (not isinstance(page, int) or isinstance(page, bool) or page < 1):
             raise ProviderError(self.source, "config", "page must be a positive integer")
 
+        for name, value in (("start_year", start_year), ("end_year", end_year)):
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or not 1900 <= value <= 2200
+            ):
+                raise ProviderError(self.source, "config", f"{name} must be an integer between 1900 and 2200")
+        if start_year is not None and end_year is not None and start_year > end_year:
+            raise ProviderError(self.source, "config", "start_year must not exceed end_year")
+
         params: dict[str, Any] = {"search": query.strip(), "per_page": per_page}
         if page is not None:
             params["page"] = page
-        if self.api_key:
-            params["api_key"] = self.api_key
-        url = f"{self.base_url}/works?{urlencode(params)}"
-        response = self._invoke_transport(url)
-        if not 200 <= response.status < 300:
-            code = "auth" if response.status in {401, 403} else "rate" if response.status == 429 else "network"
-            raise ProviderError(
-                self.source,
-                code,
-                f"HTTP status {response.status}",
-                status_code=response.status,
-                retryable=response.status >= 500 or response.status == 429,
-            )
-
-        try:
-            raw = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
-            payload = json.loads(raw)
-        except (UnicodeDecodeError, TypeError, json.JSONDecodeError) as exc:
-            raise ProviderError(self.source, "parse", "response is not valid JSON", status_code=response.status) from exc
-        if not isinstance(payload, Mapping):
-            raise ProviderError(self.source, "parse", "response JSON must be an object", status_code=response.status)
-        if payload.get("error") or payload.get("errors"):
-            detail = payload.get("error") or payload.get("errors")
-            raise ProviderError(self.source, "business", "OpenAlex returned an API error", status_code=response.status)
-        if "code" in payload and payload.get("code") not in (None, 0, "0"):
-            raise ProviderError(self.source, "business", "OpenAlex returned a non-zero code", status_code=response.status)
+        if start_year is not None and end_year is not None:
+            params["filter"] = f"publication_year:{start_year}-{end_year}"
+        elif start_year is not None:
+            params["filter"] = f"publication_year:>={start_year}"
+        elif end_year is not None:
+            params["filter"] = f"publication_year:<={end_year}"
+        payload, _ = self._request_json(self._url("/works", params))
         results = payload.get("results")
         if not isinstance(results, list):
-            raise ProviderError(self.source, "parse", "response.results must be an array", status_code=response.status)
-        if not results:
-            raise ProviderError(self.source, "empty", "OpenAlex returned no works", status_code=response.status)
-
+            raise ProviderError(self.source, "parse", "response.results must be an array")
         retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         query_id = "q_" + hashlib.sha256(query.strip().encode("utf-8")).hexdigest()[:16]
         papers: list[dict[str, Any]] = []
         for index, record in enumerate(results):
             if not isinstance(record, Mapping):
-                raise ProviderError(self.source, "parse", f"results[{index}] must be an object", status_code=response.status)
+                raise ProviderError(self.source, "parse", f"results[{index}] must be an object")
             paper = self._to_paper_doc(record, query_id=query_id, page=page or 1, retrieved_at=retrieved_at)
             validate_paper_doc(paper)
             papers.append(paper)
@@ -306,11 +360,14 @@ class OpenAlexProvider:
             "search",
             papers,
             total=total,
+            warnings=["no_results"] if not papers else [],
             provenance={
                 "endpoint": f"{self.base_url}/works",
                 "query_id": query_id,
                 "page": page or 1,
                 "per_page": per_page,
+                "filter": params.get("filter"),
+                "no_results": not papers,
             },
         )
 
@@ -328,9 +385,149 @@ class OpenAlexProvider:
         *,
         relation: str = "all",
         cursor: str | None = None,
+        page_size: int = 10,
+        limit: int | None = None,
         **_: Any,
     ) -> ProviderResult:
-        raise ProviderError(self.source, "unsupported", "OpenAlex relations endpoint is not configured")
+        """Return cited and/or citing works as PaperDoc records."""
+
+        if relation not in {"references", "citations", "all"}:
+            raise ProviderError(self.source, "config", "relation must be references, citations or all")
+        if cursor not in (None, ""):
+            raise ProviderError(self.source, "config", "relations cursor is not supported")
+        requested = page_size if limit is None else limit
+        if not isinstance(requested, int) or isinstance(requested, bool) or requested < 1:
+            raise ProviderError(self.source, "config", "relation limit must be a positive integer")
+        effective_limit = min(requested, 50)
+        warnings = ["relation_limit_truncated_to_50"] if requested > 50 else []
+        calls: list[dict[str, Any]] = []
+        source_errors: list[dict[str, Any]] = []
+
+        seed_id = self._resolve_work_id(paper_id, calls)
+        retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        query_id = "rel_" + hashlib.sha256(f"{seed_id}:{relation}".encode("utf-8")).hexdigest()[:16]
+        records: list[dict[str, Any]] = []
+        branch_successes = 0
+        branch_errors: list[ProviderError] = []
+
+        def fetch(kind: str) -> None:
+            nonlocal branch_successes
+            try:
+                relation_records = self._relation_records(seed_id, kind, effective_limit, calls)
+                branch_successes += 1
+                for item in relation_records:
+                    paper = self._to_paper_doc(item, query_id=query_id, page=1, retrieved_at=retrieved_at)
+                    paper["relation_type"] = kind
+                    paper["provenance"]["parent_node_id"] = f"openalex:{seed_id}"
+                    paper["provenance"]["relation_source"] = f"openalex/{kind}"
+                    validate_paper_doc(paper)
+                    records.append(paper)
+            except ProviderError as exc:
+                if relation != "all":
+                    raise
+                warnings.append(f"{kind}_failed:{exc.code}")
+                branch_errors.append(exc)
+                source_errors.append(exc.to_dict())
+
+        if relation in {"citations", "all"}:
+            fetch("citations")
+        if relation in {"references", "all"}:
+            fetch("references")
+
+        if branch_errors and branch_successes == 0:
+            first = branch_errors[0]
+            raise ProviderError(
+                self.source,
+                first.code,
+                "all requested OpenAlex relation branches failed",
+                retryable=any(error.retryable for error in branch_errors),
+                status_code=first.status_code,
+                details={"source_errors": source_errors},
+            )
+        if not records and not source_errors:
+            warnings.append("no_results")
+        return ProviderResult(
+            self.source,
+            "relations",
+            records,
+            total=len(records),
+            warnings=warnings,
+            provenance={
+                "endpoint": f"{self.base_url}/works",
+                "seed_openalex_id": seed_id,
+                "relation": relation,
+                "api_calls": len(calls),
+                "calls": calls,
+                "latency_ms": round(sum(call["latency_ms"] for call in calls), 3),
+                "source_errors": source_errors,
+                "no_results": not records,
+            },
+        )
+
+    def _resolve_work_id(self, paper_id: str, calls: list[dict[str, Any]]) -> str:
+        if not isinstance(paper_id, str) or not paper_id.strip():
+            raise ProviderError(self.source, "config", "paper_id must be a non-empty string")
+        value = paper_id.strip()
+        if value.casefold().startswith("openalex:"):
+            value = value.split(":", 1)[1]
+        openalex_id = _normalise_openalex_id(value)
+        if openalex_id and re.fullmatch(r"W\d+", openalex_id, flags=re.IGNORECASE):
+            return openalex_id.upper()
+
+        doi = _normalise_doi(value)
+        if not doi or not doi.startswith("10."):
+            raise ProviderError(self.source, "config", "paper_id must be an OpenAlex work ID or DOI")
+        path = "/works/" + quote(f"https://doi.org/{doi}", safe=":/")
+        payload = self._tracked_request(self._url(path, {"select": "id"}), "resolve_doi", calls)
+        resolved = _normalise_openalex_id(payload.get("id"))
+        if not resolved or not re.fullmatch(r"W\d+", resolved, flags=re.IGNORECASE):
+            raise ProviderError(self.source, "parse", "DOI lookup returned no valid OpenAlex work ID")
+        return resolved.upper()
+
+    def _relation_records(
+        self,
+        seed_id: str,
+        relation: str,
+        limit: int,
+        calls: list[dict[str, Any]],
+    ) -> list[Mapping[str, Any]]:
+        if relation == "citations":
+            payload = self._tracked_request(
+                self._url("/works", {"filter": f"cites:{seed_id}", "per_page": limit}),
+                "citations",
+                calls,
+            )
+            results = payload.get("results")
+            if not isinstance(results, list):
+                raise ProviderError(self.source, "parse", "response.results must be an array")
+            if any(not isinstance(item, Mapping) for item in results):
+                raise ProviderError(self.source, "parse", "citation results must contain objects")
+            return results
+
+        payload = self._tracked_request(
+            self._url(f"/works/{seed_id}", {"select": "id,referenced_works"}),
+            "reference_ids",
+            calls,
+        )
+        raw_ids = payload.get("referenced_works")
+        if not isinstance(raw_ids, list):
+            raise ProviderError(self.source, "parse", "referenced_works must be an array")
+        ids = list(
+            dict.fromkeys(value for value in (_normalise_openalex_id(item) for item in raw_ids) if value)
+        )[:limit]
+        if not ids:
+            return []
+        batch = self._tracked_request(
+            self._url("/works", {"filter": f"openalex_id:{'|'.join(ids)}", "per_page": len(ids)}),
+            "reference_details",
+            calls,
+        )
+        results = batch.get("results")
+        if not isinstance(results, list):
+            raise ProviderError(self.source, "parse", "response.results must be an array")
+        if any(not isinstance(item, Mapping) for item in results):
+            raise ProviderError(self.source, "parse", "reference results must contain objects")
+        return results
 
     def _to_paper_doc(
         self,

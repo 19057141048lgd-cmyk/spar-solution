@@ -7,8 +7,10 @@ from spar_solution.src.spar_baseline.experiment import (
     MODE_SPECS,
     build_fixture_providers,
     compare_regressions,
+    gold_paper_doc,
     run_wifi_fixture,
 )
+from spar_solution.src.spar_baseline.metrics import deduplicate_papers
 
 
 class ExperimentTests(unittest.TestCase):
@@ -62,6 +64,21 @@ class ExperimentTests(unittest.TestCase):
     def test_does_not_compare_incomplete_mode_set(self):
         with self.assertRaises(ValueError):
             compare_regressions({"A_arxiv": {"by_cutoff": {"10": {"recall": 0, "f1": 0}}}})
+
+    def test_gold_without_doi_does_not_inherit_mock_identifier(self):
+        first = gold_paper_doc({"paper_id": "arxiv:2301.00001", "identifiers": {"arxiv_id": "2301.00001"}, "title": "First", "year": 2023, "first_author": "A"})
+        second = gold_paper_doc({"paper_id": "arxiv:2301.00002", "identifiers": {"arxiv_id": "2301.00002"}, "title": "Second", "year": 2023, "first_author": "B"})
+        result = deduplicate_papers([first, second])
+        self.assertIsNone(first["identifiers"]["doi"])
+        self.assertIsNone(second["identifiers"]["doi"])
+        self.assertEqual(len(result["records"]), 2)
+
+    def test_gold_without_any_identifier_remains_ambiguous_not_merged(self):
+        first = gold_paper_doc({"paper_id": "gold:first", "title": "Unverified title"})
+        second = gold_paper_doc({"paper_id": "gold:second", "title": "Unverified title"})
+        result = deduplicate_papers([first, second])
+        self.assertEqual(len(result["records"]), 2)
+        self.assertEqual(result["ambiguous_indices"], [1])
 
 
 if __name__ == "__main__":

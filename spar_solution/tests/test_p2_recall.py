@@ -3,6 +3,7 @@ import unittest
 
 from spar_solution.src.spar_baseline.mock_pipeline import _paper
 from spar_solution.src.spar_baseline.p2_recall import RecallRunner, SourceRouter
+from spar_solution.src.spar_baseline.p2_stop import StopController
 from spar_solution.src.spar_baseline.providers.base import ProviderError, ProviderResult
 
 
@@ -34,6 +35,12 @@ class _TimeAwareProvider(_Provider):
     def search(self, query, *, page_size=10, start_year=None, end_year=None):
         self.year_filters.append((start_year, end_year))
         return super().search(query, page_size=page_size)
+
+
+class _EmptyProvider(_Provider):
+    def search(self, query, *, page_size=10):
+        self.calls.append((query, page_size))
+        return ProviderResult(self.name, "search", [], total=0, warnings=["no_results"])
 
 
 class RecallTests(unittest.TestCase):
@@ -91,6 +98,27 @@ class RecallTests(unittest.TestCase):
         })
         self.assertEqual(result.stats["api_calls"], 1)
         self.assertEqual(provider.year_filters, [(2020, 2024)])
+
+    def test_all_empty_results_are_successful_provider_calls(self):
+        providers = [_EmptyProvider("openalex"), _EmptyProvider("arxiv")]
+        result = RecallRunner(SourceRouter(providers)).run({
+            "subqueries": [{"query": "very narrow query", "sources": ["openalex", "arxiv"]}],
+        })
+        self.assertEqual(result.records, [])
+        self.assertEqual(result.source_errors, [])
+        self.assertEqual(result.stats["successful_calls"], 2)
+        self.assertTrue(all(call["ok"] for call in result.calls))
+        decision = StopController().decide(
+            iteration=0,
+            citation_depth=0,
+            provider_calls=result.stats["api_calls"],
+            provider_successes=result.stats["successful_calls"],
+            new_unique_papers=[0],
+            new_relevant_papers=0,
+            subquery_coverage=1,
+            evidence_coverage=0,
+        )
+        self.assertNotEqual(decision.reason_code, "ALL_PROVIDER_FAILED")
 
 
 if __name__ == "__main__":

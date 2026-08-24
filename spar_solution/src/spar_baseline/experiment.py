@@ -200,22 +200,31 @@ def evaluate_experiment(
     return metrics
 
 
-def _gold_paper_doc(item: Mapping[str, Any], source: str) -> dict[str, Any]:
-    """把 Gold 引用转换为 fixture PaperDoc；不调用网络，也不伪造本地库。"""
+def gold_paper_doc(item: Mapping[str, Any], source: str = "gold") -> dict[str, Any]:
+    """安全地把 Gold 引用转换为 PaperDoc，不继承 fixture 的 mock 标识。"""
 
     abstract = str(item.get("judgment_basis") or "Provisional Gold fixture record.")
     doc = _paper(source, abstract)
-    identifiers = doc["identifiers"]
+    identifiers = {key: None for key in doc["identifiers"]}
     identifiers.update({key: value for key, value in (item.get("identifiers") or {}).items() if value})
-    doc["paper_id"] = str(item.get("paper_id") or next(iter(identifiers.values()), item.get("title")))
+    doc["identifiers"] = identifiers
+    stable_id = next((value for value in identifiers.values() if value), None)
+    doc["paper_id"] = str(item.get("paper_id") or stable_id or item.get("title") or "unknown-gold-paper")
+    first_author = item.get("first_author")
     doc["bibliography"].update({
-        "title": item.get("title") or "Untitled fixture paper",
-        "year": item.get("year") or 0,
-        "authors": [item.get("first_author") or "Unknown"],
+        "title": item.get("title") or "",
+        "year": item.get("year"),
+        "authors": [first_author] if first_author else [],
         "abstract": abstract,
     })
     doc["scores"]["retrieval"] = 0.8
     return validate_paper_doc(doc)
+
+
+def _gold_paper_doc(item: Mapping[str, Any], source: str) -> dict[str, Any]:
+    """兼容旧内部调用；新代码应使用 ``gold_paper_doc``。"""
+
+    return gold_paper_doc(item, source)
 
 
 class FixtureProvider:
@@ -341,4 +350,4 @@ def run_wifi_fixture(
     return {"metrics": metrics, "manifest": manifest, "mode_results": mode_results}
 
 
-__all__ = ["FixtureProvider", "MODE_SPECS", "WIFI_QUERIES", "build_fixture_providers", "compare_regressions", "evaluate_experiment", "run_mode", "run_wifi_fixture"]
+__all__ = ["FixtureProvider", "MODE_SPECS", "WIFI_QUERIES", "build_fixture_providers", "compare_regressions", "evaluate_experiment", "gold_paper_doc", "run_mode", "run_wifi_fixture"]

@@ -7,10 +7,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Iterable, Mapping
 
 from .paperdoc import canonical_paper_key, merge_paper_docs, validate_paper_doc
@@ -23,6 +24,7 @@ from .providers.base import ProviderError, ProviderResult
 from .query_plan import QueryPlanValidationError, validate_query_plan
 from .query_planner import QueryPlanner
 from .deepseek_layer import DeepSeekCallError, DeepSeekSchemaError, DeepSeekUnderstandingLayer
+from .final_output import build_final_selection, validate_final_selection
 from .p2_evidence import ConstraintResult, ConstraintVerdict
 
 
@@ -95,6 +97,7 @@ class P2Run:
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     stops: list[dict[str, Any]] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
+    cost: dict[str, Any] = field(default_factory=dict)
     manifest: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,15 +119,28 @@ class P2Pipeline:
         self.scorer = Scorer()
 
     def run(self, query: str, *, output_dir: str | Path | None = None) -> P2Run:
+        wall_started = perf_counter()
+        stage_ms = {"plan": 0.0, "recall": 0.0, "judge": 0.0, "citation": 0.0, "evidence": 0.0}
         errors: list[dict[str, Any]] = []
         plan = self.planner.plan(query)
+        planner_source = "rules"
+        llm_client = getattr(self.understanding_layer, "client", None) if self.understanding_layer is not None else None
+        if llm_client is not None and callable(getattr(llm_client, "reset_usage", None)):
+            llm_client.reset_usage(max_calls=int(plan["budget"].get("max_llm_calls", 10)))
         if self.understanding_layer is not None:
+            started = perf_counter()
             try:
                 plan = self.understanding_layer.plan(query)
+                planner_source = "deepseek"
             except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
+                planner_source = "llm_fallback_rules"
                 errors.append({"source": "deepseek", "code": getattr(exc, "code", "plan_fallback"), "message": str(exc)[:200], "stage": "plan"})
+            finally:
+                stage_ms["plan"] += (perf_counter() - started) * 1000
         run = P2Run(query=query, query_plan=plan.to_dict(), errors=errors)
         seen: list[dict[str, Any]] = []
+        scored_ids: set[str] = set()
+        citation_seed_ids: set[str] = set()
         deepseek_judge_batches = 0
         previous_new: list[int] = []
         stop_controller = StopController.from_query_plan(plan)
@@ -145,7 +161,9 @@ class P2Pipeline:
                 subquery["sources"] = list(subquery.get("source_capabilities") or [])
             calls_before = sum(item.get("stats", {}).get("api_calls", 0) for item in run.recall) + sum(item.get("stats", {}).get("api_calls", 0) for item in run.citations)
             remaining_calls = max(0, int(plan["budget"]["max_provider_calls"]) - calls_before)
+            started = perf_counter()
             recall = RecallRunner(SourceRouter(self.providers), max_workers=self.max_workers, page_size=self.page_size).run(iteration_plan, iteration=iteration, max_calls=remaining_calls)
+            stage_ms["recall"] += (perf_counter() - started) * 1000
             run.recall.append(recall.to_dict())
             run.errors.extend(recall.source_errors)
             unique, dedup_errors = _deduplicate([*seen, *recall.records])
@@ -154,56 +172,118 @@ class P2Pipeline:
             seen = unique
             for paper in seen:
                 paper.setdefault("provenance", {})["query_id"] = plan["query_id"]
-            constraints: list[Any] = []
-            evidence_items: list[Any] = []
-            scored: list[dict[str, Any]] = []
-            judgements: dict[str, dict[str, Any]] = {}
-            if self.understanding_layer is not None and seen:
-                try:
-                    for start in range(0, min(len(seen), 12)):
-                        deepseek_judge_batches += 1
-                        judgements.update({str(item["paper_id"]): item for item in self.understanding_layer.judge(plan, seen[start:start + 1])})
-                except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
-                    run.errors.append({"source": "deepseek", "code": getattr(exc, "code", "judge_fallback"), "message": str(exc)[:200], "stage": "judge"})
-            for paper in seen:
+            unscored = [paper for paper in seen if str(paper.get("paper_id")) not in scored_ids]
+            scored = [paper for paper in seen if str(paper.get("paper_id")) in scored_ids]
+            prepared: dict[str, tuple[ConstraintVerdict, list[Any], Any]] = {}
+            started = perf_counter()
+            for paper in unscored:
+                paper_id = str(paper["paper_id"])
                 constraint = self.gate.evaluate(plan, paper)
-                judgement = judgements.get(str(paper.get("paper_id")))
+                items = EvidenceLoader().load(paper, required_status="abstract")
+                prepared[paper_id] = (constraint, items, self.scorer.score(paper, plan, constraint, items))
+            stage_ms["evidence"] += (perf_counter() - started) * 1000
+            judgements: dict[str, dict[str, Any]] = {}
+            llm_unavailable_ids: set[str] = set()
+            if self.understanding_layer is not None and unscored:
+                judge_candidates = sorted(
+                    (paper for paper in unscored if prepared[str(paper["paper_id"])][0].state != "fail"),
+                    key=lambda paper: prepared[str(paper["paper_id"])][2].component_scores["relevance"],
+                    reverse=True,
+                )[:20]
+                for start in range(0, len(judge_candidates), 10):
+                    batch = judge_candidates[start:start + 10]
+                    started = perf_counter()
+                    try:
+                        deepseek_judge_batches += 1
+                        judgements.update({str(item["paper_id"]): item for item in self.understanding_layer.judge(plan, batch)})
+                    except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
+                        llm_unavailable_ids.update(str(item["paper_id"]) for item in batch)
+                        run.errors.append({"source": "deepseek", "code": getattr(exc, "code", "judge_fallback"), "message": str(exc)[:200], "stage": "judge"})
+                    finally:
+                        stage_ms["judge"] += (perf_counter() - started) * 1000
+            started = perf_counter()
+            for paper in unscored:
+                paper_id = str(paper["paper_id"])
+                constraint, items, verdict = prepared[paper_id]
+                judgement = judgements.get(paper_id)
                 if judgement is not None:
                     state = str(judgement.get("hard_constraint_state") or "unknown")
                     if state == "fail":
                         constraint = ConstraintVerdict(state="fail", results=constraint.results + (ConstraintResult("deepseek", "explicit", "fail", "deepseek_explicit_fail"),), reason_codes=constraint.reason_codes + ("deepseek_explicit_fail",))
                     elif state == "unknown" and constraint.state == "pass":
                         constraint = ConstraintVerdict(state="unknown", results=constraint.results, reason_codes=constraint.reason_codes + ("deepseek_unknown",))
-                items = EvidenceLoader().load(paper, required_status="abstract")
-                overrides = {"relevance": judgement["relevance_score"]} if judgement is not None else None
-                verdict = self.scorer.score(paper, plan, constraint, items, component_overrides=overrides)
+                    verdict = self.scorer.score(paper, plan, constraint, items, component_overrides={"relevance": judgement["relevance_score"]})
+                if paper_id in llm_unavailable_ids:
+                    verdict = replace(verdict, warnings=tuple(dict.fromkeys((*verdict.warnings, "llm_judge_unavailable"))))
                 scored.append(_annotate(paper, verdict, constraint, items))
-                constraints.append(constraint)
-                evidence_items.extend(items)
                 for evidence_item in items:
                     evidence_dict = evidence_item.to_dict()
                     evidence_dict["iteration"] = iteration
                     run.evidence.append(evidence_dict)
                 verdict_dict = verdict.to_dict()
                 verdict_dict["iteration"] = iteration
+                if judgement is not None:
+                    verdict_dict["llm_judgement"] = {key: judgement[key] for key in ("relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
                 run.verdicts.append(verdict_dict)
+                scored_ids.add(str(paper["paper_id"]))
+            stage_ms["evidence"] += (perf_counter() - started) * 1000
             # 引用扩展和最终输出必须使用已经附加分量分、约束状态及
             # evidence_refs 的 PaperDoc，而不能继续保留原始候选。
             seen = scored
             scored.sort(key=lambda p: (p.get("scores", {}).get("final") is not None, p.get("scores", {}).get("final") or -1, p.get("paper_id", "")), reverse=True)
             citation_budget = max(0, remaining_calls - recall.stats.get("api_calls", 0))
-            citation = CitationExpander(self.citation_providers, enabled=self.citation_enabled, max_depth=1, max_seeds=min(5, citation_budget), page_size=self.page_size, max_workers=self.max_workers).expand(scored, iteration=iteration)
+            citation_candidates = [paper for paper in scored if str(paper.get("paper_id")) not in citation_seed_ids and int((paper.get("provenance") or {}).get("citation_depth") or 0) < 1]
+            started = perf_counter()
+            citation = CitationExpander(self.citation_providers, enabled=self.citation_enabled, max_depth=1, max_seeds=5, page_size=self.page_size, max_workers=self.max_workers, max_api_calls=citation_budget).expand(citation_candidates, iteration=iteration)
+            stage_ms["citation"] += (perf_counter() - started) * 1000
+            citation_seed_ids.update(str(call.get("paper_id")) for call in citation.calls if call.get("paper_id"))
             run.citations.append(citation.to_dict())
             run.errors.extend(citation.source_errors)
             if citation.papers:
                 scored_children: list[dict[str, Any]] = []
-                for paper in citation.papers:
-                    paper.setdefault("provenance", {})["query_id"] = plan["query_id"]
+                child_judgements: dict[str, dict[str, Any]] = {}
+                child_llm_unavailable_ids: set[str] = set()
+                unscored_children = [paper for paper in citation.papers if str(paper.get("paper_id")) not in scored_ids]
+                prepared_children: dict[str, tuple[ConstraintVerdict, list[Any], Any]] = {}
+                started = perf_counter()
+                for paper in unscored_children:
+                    paper_id = str(paper["paper_id"])
                     constraint = self.gate.evaluate(plan, paper)
                     items = EvidenceLoader().load(paper, required_status="abstract")
-                    judgement = judgements.get(str(paper.get("paper_id")))
-                    overrides = {"relevance": judgement["relevance_score"]} if judgement is not None else None
-                    verdict = self.scorer.score(paper, plan, constraint, items, component_overrides=overrides)
+                    prepared_children[paper_id] = (constraint, items, self.scorer.score(paper, plan, constraint, items))
+                stage_ms["evidence"] += (perf_counter() - started) * 1000
+                if self.understanding_layer is not None and unscored_children:
+                    child_judge_candidates = sorted(
+                        (paper for paper in unscored_children if prepared_children[str(paper["paper_id"])][0].state != "fail"),
+                        key=lambda paper: prepared_children[str(paper["paper_id"])][2].component_scores["relevance"],
+                        reverse=True,
+                    )[:20]
+                    for start in range(0, len(child_judge_candidates), 10):
+                        batch = child_judge_candidates[start:start + 10]
+                        started = perf_counter()
+                        try:
+                            deepseek_judge_batches += 1
+                            child_judgements.update({str(item["paper_id"]): item for item in self.understanding_layer.judge(plan, batch)})
+                        except (DeepSeekCallError, DeepSeekSchemaError, ValueError) as exc:
+                            child_llm_unavailable_ids.update(str(item["paper_id"]) for item in batch)
+                            run.errors.append({"source": "deepseek", "code": getattr(exc, "code", "judge_fallback"), "message": str(exc)[:200], "stage": "citation_judge"})
+                        finally:
+                            stage_ms["judge"] += (perf_counter() - started) * 1000
+                started = perf_counter()
+                for paper in unscored_children:
+                    paper.setdefault("provenance", {})["query_id"] = plan["query_id"]
+                    paper_id = str(paper["paper_id"])
+                    constraint, items, verdict = prepared_children[paper_id]
+                    judgement = child_judgements.get(paper_id)
+                    if judgement is not None:
+                        state = str(judgement.get("hard_constraint_state") or "unknown")
+                        if state == "fail":
+                            constraint = ConstraintVerdict(state="fail", results=constraint.results + (ConstraintResult("deepseek", "explicit", "fail", "deepseek_explicit_fail"),), reason_codes=constraint.reason_codes + ("deepseek_explicit_fail",))
+                        elif state == "unknown" and constraint.state == "pass":
+                            constraint = ConstraintVerdict(state="unknown", results=constraint.results, reason_codes=constraint.reason_codes + ("deepseek_unknown",))
+                        verdict = self.scorer.score(paper, plan, constraint, items, component_overrides={"relevance": judgement["relevance_score"]})
+                    if paper_id in child_llm_unavailable_ids:
+                        verdict = replace(verdict, warnings=tuple(dict.fromkeys((*verdict.warnings, "llm_judge_unavailable"))))
                     scored_children.append(_annotate(paper, verdict, constraint, items))
                     for evidence_item in items:
                         evidence_dict = evidence_item.to_dict()
@@ -211,7 +291,11 @@ class P2Pipeline:
                         run.evidence.append(evidence_dict)
                     verdict_dict = verdict.to_dict()
                     verdict_dict["iteration"] = iteration
+                    if judgement is not None:
+                        verdict_dict["llm_judgement"] = {key: judgement[key] for key in ("relevance_label", "hard_constraint_state", "reason", "evidence_needed", "confidence")}
                     run.verdicts.append(verdict_dict)
+                    scored_ids.add(str(paper["paper_id"]))
+                stage_ms["evidence"] += (perf_counter() - started) * 1000
                 expanded, expand_errors = _deduplicate([*seen, *scored_children])
                 run.errors.extend(expand_errors)
                 citation_depth = 1
@@ -232,7 +316,25 @@ class P2Pipeline:
             run.stops.append(decision.to_dict())
             if decision.should_stop:
                 break
-        run.manifest = {"schema_version": "p2_run.v1", "query": query, "query_id": plan["query_id"], "citation_enabled": self.citation_enabled, "deepseek_judge_batches": deepseek_judge_batches, "generated_at": datetime.now(timezone.utc).isoformat(), "iterations": len(run.recall), "status": "degraded" if run.errors else "ok"}
+        provider_calls: dict[str, int] = {}
+        for group in (*run.recall, *run.citations):
+            for call in group.get("calls") or []:
+                source = str(call.get("source") or "unknown")
+                provider_calls[source] = provider_calls.get(source, 0) + int(call.get("api_calls") or 1)
+        usage = getattr(llm_client, "usage", {}) if llm_client is not None else {}
+        usage = usage if isinstance(usage, Mapping) else {}
+        run.cost = {
+            "provider_calls": provider_calls,
+            "llm_calls": int(usage.get("calls", 0)),
+            "prompt_tokens": int(usage.get("prompt_tokens", 0)),
+            "completion_tokens": int(usage.get("completion_tokens", 0)),
+            "total_tokens": int(usage.get("total_tokens", 0)),
+            "llm_failures": max(int(usage.get("failures", 0)), sum(1 for item in run.errors if item.get("source") == "deepseek")),
+            "wall_ms": round((perf_counter() - wall_started) * 1000, 3),
+            "per_stage_ms": {name: round(value, 3) for name, value in stage_ms.items()},
+        }
+        provider_names = sorted(str(name) for name in self.providers) if isinstance(self.providers, Mapping) else sorted(str(getattr(item, "name", getattr(item, "source", type(item).__name__))) for item in self.providers)
+        run.manifest = {"schema_version": "p2_run.v1", "query": query, "query_id": plan["query_id"], "citation_enabled": self.citation_enabled, "providers": provider_names, "planner_source": planner_source, "deepseek_status": "configured" if self.understanding_layer is not None else "unavailable", "deepseek_judge_batches": deepseek_judge_batches, "generated_at": datetime.now(timezone.utc).isoformat(), "iterations": len(run.recall), "status": "degraded" if run.errors else "ok", "cost": run.cost}
         if output_dir is not None:
             self.write_artifacts(run, output_dir)
         return run
@@ -268,13 +370,13 @@ class P2Pipeline:
         for verdict in run.verdicts:
             verdict["evidence_refs"] = [ref_rewrites.get(str(ref), str(ref)) for ref in verdict.get("evidence_refs") or []]
         run.manifest["evidence_files"] = sorted(set(evidence_files))
-        files = {"query_plan.json": run.query_plan, "recall.json": run.recall, "papers.json": {"papers": run.papers}, "citation.json": run.citations, "evidence.json": run.evidence, "verdicts.json": run.verdicts, "stop.json": run.stops, "errors.json": run.errors, "run_manifest.json": run.manifest}
+        files = {"query_plan.json": run.query_plan, "recall.json": run.recall, "papers.json": {"papers": run.papers}, "citation.json": run.citations, "evidence.json": run.evidence, "verdicts.json": run.verdicts, "stop.json": run.stops, "errors.json": run.errors, "run_manifest.json": run.manifest, "final_selection.json": build_final_selection(run)}
         for name, value in files.items():
             _write_json(root / name, value)
         return root
 
 
-def replay_p2(output_dir: str | Path) -> dict[str, Any]:
+def replay_p2(output_dir: str | Path, *, validate_final: bool = True) -> dict[str, Any]:
     """读取并校验 artifact，返回与运行结果同形状的回放对象。"""
     root = Path(output_dir)
     names = ("query_plan", "recall", "papers", "citation", "evidence", "verdicts", "stop", "errors", "run_manifest")
@@ -284,6 +386,9 @@ def replay_p2(output_dir: str | Path) -> dict[str, Any]:
         if not path.is_file():
             raise FileNotFoundError(path)
         output[name] = json.loads(path.read_text(encoding="utf-8"))
+    final_path = root / "final_selection.json"
+    if final_path.is_file() and validate_final:
+        output["final_selection"] = validate_final_selection(json.loads(final_path.read_text(encoding="utf-8")))
     try:
         validate_query_plan(output["query_plan"])
     except (KeyError, TypeError, QueryPlanValidationError) as exc:

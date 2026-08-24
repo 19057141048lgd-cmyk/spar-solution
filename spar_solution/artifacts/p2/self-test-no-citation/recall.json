@@ -3,7 +3,7 @@
     "calls": [
       {
         "iteration": 0,
-        "latency_ms": 0.218,
+        "latency_ms": 0.197,
         "ok": true,
         "query": "wifi heart rate monitoring",
         "records": 1,
@@ -115,6 +115,424 @@
       "route_count": 1,
       "source_errors": 0,
       "successful_calls": 1
+    }
+  },
+  {
+    "calls": [
+      {
+        "iteration": 1,
+        "latency_ms": 0.157,
+        "ok": true,
+        "query": "wifi heart rate monitoring methods techniques algorithms",
+        "records": 1,
+        "source": "arxiv",
+        "subquery_id": "sq_missing_method_01"
+      },
+      {
+        "iteration": 1,
+        "latency_ms": 0.11,
+        "ok": true,
+        "query": "wifi heart rate monitoring datasets benchmarks",
+        "records": 1,
+        "source": "arxiv",
+        "subquery_id": "sq_missing_dataset_01"
+      },
+      {
+        "iteration": 1,
+        "latency_ms": 0.083,
+        "ok": true,
+        "query": "wifi heart rate monitoring publication year date",
+        "records": 1,
+        "source": "arxiv",
+        "subquery_id": "sq_missing_time_range_01"
+      },
+      {
+        "iteration": 1,
+        "latency_ms": 0.199,
+        "ok": true,
+        "query": "wifi heart rate monitoring applications use cases",
+        "records": 1,
+        "source": "arxiv",
+        "subquery_id": "sq_missing_application_01"
+      }
+    ],
+    "records": [
+      {
+        "access": {
+          "content_type": "abstract",
+          "full_text_status": "abstract",
+          "landing_url": "https://example.invalid/paper",
+          "oa_url": null,
+          "pdf_url": null
+        },
+        "bibliography": {
+          "abstract": "WiFi heart rate monitoring using CSI signals and contactless vital sign estimation.",
+          "authors": [
+            "Ada Lovelace"
+          ],
+          "fields": [
+            "computer science"
+          ],
+          "title": "Mock scientific retrieval paper",
+          "venue": "Mock Venue",
+          "year": 2025
+        },
+        "content": {
+          "char_count": 83,
+          "chunks": [],
+          "content_ref": null,
+          "sections": []
+        },
+        "evidence_refs": [],
+        "identifiers": {
+          "arxiv_id": null,
+          "doi": "10.1234/fixture.seed",
+          "openalex_id": null,
+          "pmcid": null,
+          "pmid": null,
+          "s2_id": null,
+          "sciverse_doc_id": null,
+          "unique_id": null
+        },
+        "paper_id": "fixture:seed",
+        "provenance": {
+          "endpoints": [
+            "mock://arxiv/search"
+          ],
+          "execution_status": "mock",
+          "iteration": 1,
+          "pages": [
+            1
+          ],
+          "parent_node_id": "sq_topic_01",
+          "query_id": "mock-query",
+          "reconciliation": {
+            "complete": true
+          },
+          "retrieved_at": "2026-08-24T00:00:00Z",
+          "sources": [
+            "arxiv"
+          ],
+          "subquery_id": "sq_missing_method_01",
+          "warnings": []
+        },
+        "relations": {
+          "citations": [],
+          "references": [],
+          "related_works": []
+        },
+        "schema_version": "paperdoc.v1",
+        "scores": {
+          "citation": null,
+          "confidence": null,
+          "constraint": null,
+          "evidence": null,
+          "final": null,
+          "novelty": null,
+          "quality": null,
+          "relevance": null,
+          "retrieval": 0.8
+        },
+        "status": {
+          "evidence_status": "abstract",
+          "hard_constraints_pass": null,
+          "provider_errors": []
+        }
+      },
+      {
+        "access": {
+          "content_type": "abstract",
+          "full_text_status": "abstract",
+          "landing_url": "https://example.invalid/paper",
+          "oa_url": null,
+          "pdf_url": null
+        },
+        "bibliography": {
+          "abstract": "WiFi heart rate monitoring using CSI signals and contactless vital sign estimation.",
+          "authors": [
+            "Ada Lovelace"
+          ],
+          "fields": [
+            "computer science"
+          ],
+          "title": "Mock scientific retrieval paper",
+          "venue": "Mock Venue",
+          "year": 2025
+        },
+        "content": {
+          "char_count": 83,
+          "chunks": [],
+          "content_ref": null,
+          "sections": []
+        },
+        "evidence_refs": [],
+        "identifiers": {
+          "arxiv_id": null,
+          "doi": "10.1234/fixture.seed",
+          "openalex_id": null,
+          "pmcid": null,
+          "pmid": null,
+          "s2_id": null,
+          "sciverse_doc_id": null,
+          "unique_id": null
+        },
+        "paper_id": "fixture:seed",
+        "provenance": {
+          "endpoints": [
+            "mock://arxiv/search"
+          ],
+          "execution_status": "mock",
+          "iteration": 1,
+          "pages": [
+            1
+          ],
+          "parent_node_id": "sq_topic_01",
+          "query_id": "mock-query",
+          "reconciliation": {
+            "complete": true
+          },
+          "retrieved_at": "2026-08-24T00:00:00Z",
+          "sources": [
+            "arxiv"
+          ],
+          "subquery_id": "sq_missing_dataset_01",
+          "warnings": []
+        },
+        "relations": {
+          "citations": [],
+          "references": [],
+          "related_works": []
+        },
+        "schema_version": "paperdoc.v1",
+        "scores": {
+          "citation": null,
+          "confidence": null,
+          "constraint": null,
+          "evidence": null,
+          "final": null,
+          "novelty": null,
+          "quality": null,
+          "relevance": null,
+          "retrieval": 0.8
+        },
+        "status": {
+          "evidence_status": "abstract",
+          "hard_constraints_pass": null,
+          "provider_errors": []
+        }
+      },
+      {
+        "access": {
+          "content_type": "abstract",
+          "full_text_status": "abstract",
+          "landing_url": "https://example.invalid/paper",
+          "oa_url": null,
+          "pdf_url": null
+        },
+        "bibliography": {
+          "abstract": "WiFi heart rate monitoring using CSI signals and contactless vital sign estimation.",
+          "authors": [
+            "Ada Lovelace"
+          ],
+          "fields": [
+            "computer science"
+          ],
+          "title": "Mock scientific retrieval paper",
+          "venue": "Mock Venue",
+          "year": 2025
+        },
+        "content": {
+          "char_count": 83,
+          "chunks": [],
+          "content_ref": null,
+          "sections": []
+        },
+        "evidence_refs": [],
+        "identifiers": {
+          "arxiv_id": null,
+          "doi": "10.1234/fixture.seed",
+          "openalex_id": null,
+          "pmcid": null,
+          "pmid": null,
+          "s2_id": null,
+          "sciverse_doc_id": null,
+          "unique_id": null
+        },
+        "paper_id": "fixture:seed",
+        "provenance": {
+          "endpoints": [
+            "mock://arxiv/search"
+          ],
+          "execution_status": "mock",
+          "iteration": 1,
+          "pages": [
+            1
+          ],
+          "parent_node_id": "sq_topic_01",
+          "query_id": "mock-query",
+          "reconciliation": {
+            "complete": true
+          },
+          "retrieved_at": "2026-08-24T00:00:00Z",
+          "sources": [
+            "arxiv"
+          ],
+          "subquery_id": "sq_missing_time_range_01",
+          "warnings": []
+        },
+        "relations": {
+          "citations": [],
+          "references": [],
+          "related_works": []
+        },
+        "schema_version": "paperdoc.v1",
+        "scores": {
+          "citation": null,
+          "confidence": null,
+          "constraint": null,
+          "evidence": null,
+          "final": null,
+          "novelty": null,
+          "quality": null,
+          "relevance": null,
+          "retrieval": 0.8
+        },
+        "status": {
+          "evidence_status": "abstract",
+          "hard_constraints_pass": null,
+          "provider_errors": []
+        }
+      },
+      {
+        "access": {
+          "content_type": "abstract",
+          "full_text_status": "abstract",
+          "landing_url": "https://example.invalid/paper",
+          "oa_url": null,
+          "pdf_url": null
+        },
+        "bibliography": {
+          "abstract": "WiFi heart rate monitoring using CSI signals and contactless vital sign estimation.",
+          "authors": [
+            "Ada Lovelace"
+          ],
+          "fields": [
+            "computer science"
+          ],
+          "title": "Mock scientific retrieval paper",
+          "venue": "Mock Venue",
+          "year": 2025
+        },
+        "content": {
+          "char_count": 83,
+          "chunks": [],
+          "content_ref": null,
+          "sections": []
+        },
+        "evidence_refs": [],
+        "identifiers": {
+          "arxiv_id": null,
+          "doi": "10.1234/fixture.seed",
+          "openalex_id": null,
+          "pmcid": null,
+          "pmid": null,
+          "s2_id": null,
+          "sciverse_doc_id": null,
+          "unique_id": null
+        },
+        "paper_id": "fixture:seed",
+        "provenance": {
+          "endpoints": [
+            "mock://arxiv/search"
+          ],
+          "execution_status": "mock",
+          "iteration": 1,
+          "pages": [
+            1
+          ],
+          "parent_node_id": "sq_topic_01",
+          "query_id": "mock-query",
+          "reconciliation": {
+            "complete": true
+          },
+          "retrieved_at": "2026-08-24T00:00:00Z",
+          "sources": [
+            "arxiv"
+          ],
+          "subquery_id": "sq_missing_application_01",
+          "warnings": []
+        },
+        "relations": {
+          "citations": [],
+          "references": [],
+          "related_works": []
+        },
+        "schema_version": "paperdoc.v1",
+        "scores": {
+          "citation": null,
+          "confidence": null,
+          "constraint": null,
+          "evidence": null,
+          "final": null,
+          "novelty": null,
+          "quality": null,
+          "relevance": null,
+          "retrieval": 0.8
+        },
+        "status": {
+          "evidence_status": "abstract",
+          "hard_constraints_pass": null,
+          "provider_errors": []
+        }
+      }
+    ],
+    "routes": [
+      {
+        "iteration": 1,
+        "node_index": 0,
+        "parent_node_id": "sq_topic_01",
+        "query": "wifi heart rate monitoring methods techniques algorithms",
+        "reason": "capability_match",
+        "source": "arxiv",
+        "subquery_id": "sq_missing_method_01"
+      },
+      {
+        "iteration": 1,
+        "node_index": 1,
+        "parent_node_id": "sq_topic_01",
+        "query": "wifi heart rate monitoring datasets benchmarks",
+        "reason": "capability_match",
+        "source": "arxiv",
+        "subquery_id": "sq_missing_dataset_01"
+      },
+      {
+        "iteration": 1,
+        "node_index": 2,
+        "parent_node_id": "sq_topic_01",
+        "query": "wifi heart rate monitoring publication year date",
+        "reason": "capability_match",
+        "source": "arxiv",
+        "subquery_id": "sq_missing_time_range_01"
+      },
+      {
+        "iteration": 1,
+        "node_index": 3,
+        "parent_node_id": "sq_topic_01",
+        "query": "wifi heart rate monitoring applications use cases",
+        "reason": "capability_match",
+        "source": "arxiv",
+        "subquery_id": "sq_missing_application_01"
+      }
+    ],
+    "source_errors": [],
+    "stats": {
+      "api_calls": 4,
+      "iteration": 1,
+      "max_workers": 4,
+      "records": 4,
+      "route_count": 4,
+      "source_errors": 0,
+      "successful_calls": 4
     }
   }
 ]

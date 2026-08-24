@@ -19,7 +19,7 @@ QueryPlanner → SourceRouter → RecallRunner → FusionDeduper
 - 引用种子必须通过硬约束、至少具备摘要、相关性达到配置阈值。
 - `metadata` 不能冒充正文证据；EvidenceItem 必须带 `evidence_ref` 或明确 unavailable。
 - 分量固定为 relevance、constraint、evidence、quality、citation、novelty；默认权重为 0.30/0.25/0.20/0.10/0.10/0.05，仅作为可配置基线。
-- 强停止：`BUDGET_EXHAUSTED`、`MAX_ITERATION`、`MAX_CITATION_DEPTH`、`ALL_PROVIDER_FAILED`、`NO_NEW_PAPER_2_ROUNDS`。
+- 强停止：`BUDGET_EXHAUSTED`、`MAX_ITERATION`、`ALL_PROVIDER_FAILED`、`NO_NEW_PAPER_2_ROUNDS`。`MAX_CITATION_DEPTH` 只限制引用扩展并写入 `triggered_conditions`，不终止整个查询迭代。
 - 软停止至少满足三项中的两项：新增高相关论文 < 2、子查询覆盖率 >= 0.8、证据覆盖率 >= 0.7。
 - 所有结构化对象必须可校验和落盘回放；长正文只通过 `content_ref`/`evidence_ref` 引用。
 

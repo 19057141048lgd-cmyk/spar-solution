@@ -144,6 +144,7 @@ class CitationExpander:
         page_size: int = 10,
         max_workers: int = 4,
         relation: str = "all",
+        max_api_calls: int | None = None,
     ) -> None:
         if max_depth not in {0, 1}:
             raise ValueError("P2 max_depth must be 0 or 1")
@@ -151,6 +152,8 @@ class CitationExpander:
             raise ValueError("max_seeds must be non-negative; page_size and max_workers must be positive")
         if not 0 <= relevance_threshold <= 1:
             raise ValueError("relevance_threshold must be between 0 and 1")
+        if max_api_calls is not None and (isinstance(max_api_calls, bool) or not isinstance(max_api_calls, int) or max_api_calls < 0):
+            raise ValueError("max_api_calls must be a non-negative integer or null")
         if isinstance(providers, Mapping):
             self.providers = {str(name).casefold(): provider for name, provider in providers.items()}
         else:
@@ -162,6 +165,7 @@ class CitationExpander:
         self.page_size = page_size
         self.max_workers = max_workers
         self.relation = relation
+        self.max_api_calls = max_api_calls
 
     def eligible(self, seed: Mapping[str, Any]) -> bool:
         status = seed.get("status", {})
@@ -192,8 +196,10 @@ class CitationExpander:
             return CitationExpansionResult(stats={"enabled": False, "ablation": "citation_disabled", "eligible_seeds": 0, "api_calls": 0, "papers": 0, "edges": 0, "source_errors": 0, "max_depth": self.max_depth})
 
         seeds = self.select_seeds(all_papers)
-        tasks: list[tuple[int, dict[str, Any], str, Any]] = []
+        tasks: list[tuple[int, dict[str, Any], str, Any, str, int]] = []
         immediate_errors: list[dict[str, Any]] = []
+        reserved_calls = 0
+        budget_skipped = 0
         for index, seed in enumerate(seeds):
             selected = self._provider_for(seed)
             if selected is None:
@@ -201,15 +207,22 @@ class CitationExpander:
                 immediate_errors.append({"source": sources[0] if sources else "unknown", "code": "config", "message": "no relations provider for eligible seed", "retryable": False, "status_code": None, "details": {"paper_id": seed.get("paper_id")}})
                 continue
             source, provider = selected
-            tasks.append((index, seed, source, provider))
+            provider_paper_id = str((seed.get("identifiers") or {}).get("openalex_id") or seed["paper_id"]) if source == "openalex" else str(seed["paper_id"])
+            cost_fn = getattr(provider, "relation_api_cost", None)
+            estimated_calls = int(cost_fn(provider_paper_id, self.relation)) if callable(cost_fn) else 1
+            if self.max_api_calls is not None and reserved_calls + estimated_calls > self.max_api_calls:
+                budget_skipped += 1
+                continue
+            reserved_calls += estimated_calls
+            tasks.append((index, seed, source, provider, provider_paper_id, estimated_calls))
 
         completed: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, dict[str, Any]]] = {}
 
-        def execute(index: int, seed: dict[str, Any], source: str, provider: Any) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, dict[str, Any]]:
+        def execute(index: int, seed: dict[str, Any], source: str, provider: Any, provider_paper_id: str, estimated_calls: int) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, dict[str, Any]]:
             started = perf_counter()
             parent_id = str(seed["paper_id"])
             try:
-                result = _relation_call(provider, parent_id, self.relation, self.page_size)
+                result = _relation_call(provider, provider_paper_id, self.relation, self.page_size)
                 expanded: list[dict[str, Any]] = []
                 edges: list[dict[str, Any]] = []
                 for record in result.records:
@@ -228,10 +241,11 @@ class CitationExpander:
                         child.setdefault("relations", {}).setdefault("related_works", [])
                         validate_paper_doc(child)
                         expanded.append(child)
-                call = {"paper_id": parent_id, "source": source, "relation": self.relation, "records": len(result.records), "ok": True, "latency_ms": round((perf_counter() - started) * 1000, 3), "depth": 1}
+                api_calls = int(result.provenance.get("api_calls") or estimated_calls)
+                call = {"paper_id": parent_id, "source": source, "relation": self.relation, "records": len(result.records), "ok": True, "api_calls": api_calls, "latency_ms": round((perf_counter() - started) * 1000, 3), "depth": 1}
                 return index, expanded, edges, None, call
             except Exception as exc:
-                call = {"paper_id": parent_id, "source": source, "relation": self.relation, "records": 0, "ok": False, "latency_ms": round((perf_counter() - started) * 1000, 3), "depth": 1}
+                call = {"paper_id": parent_id, "source": source, "relation": self.relation, "records": 0, "ok": False, "api_calls": estimated_calls, "latency_ms": round((perf_counter() - started) * 1000, 3), "depth": 1}
                 return index, [], [], _error(source, exc), call
 
         with ThreadPoolExecutor(max_workers=min(self.max_workers, max(1, len(tasks)))) as executor:
@@ -243,7 +257,7 @@ class CitationExpander:
         output = CitationExpansionResult(source_errors=immediate_errors)
         seen_papers: set[str] = set()
         seen_edges: set[tuple[str, str, str, str]] = set()
-        for index, _, _, _ in tasks:
+        for index, _, _, _, _, _ in tasks:
             expanded, edges, error, call = completed[index]
             output.calls.append(call)
             if error:
@@ -258,7 +272,7 @@ class CitationExpander:
                 if key not in seen_edges:
                     seen_edges.add(key)
                     output.edges.append(edge)
-        output.stats = {"enabled": True, "ablation": None, "eligible_seeds": len(seeds), "api_calls": len(tasks), "papers": len(output.papers), "edges": len(output.edges), "source_errors": len(output.source_errors), "max_depth": self.max_depth, "iteration": iteration}
+        output.stats = {"enabled": True, "ablation": None, "eligible_seeds": len(seeds), "api_calls": sum(int(call.get("api_calls") or 1) for call in output.calls), "papers": len(output.papers), "edges": len(output.edges), "source_errors": len(output.source_errors), "max_depth": self.max_depth, "iteration": iteration, "budget_skipped": budget_skipped}
         return output
 
     run = expand

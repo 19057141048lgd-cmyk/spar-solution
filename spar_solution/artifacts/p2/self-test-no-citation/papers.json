@@ -61,7 +61,8 @@
         },
         "retrieved_at": "2026-08-24T00:00:00Z",
         "sources": [
-          "arxiv"
+          "arxiv",
+          "merged"
         ],
         "subquery_id": "sq_topic_01",
         "warnings": []

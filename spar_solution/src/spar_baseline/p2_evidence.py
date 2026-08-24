@@ -119,12 +119,26 @@ class ConstraintGate:
             year = bib.get("year")
             if year is None:
                 return _constraint_result(name, expected, "unknown", "year_unavailable")
-            match = re.search(r"(\d{4})\s*(?:-|to|~|至)\s*(\d{4})", expected, flags=re.I)
-            if match:
-                ok = int(match.group(1)) <= int(year) <= int(match.group(2))
+            observed_year = int(year)
+            # Canonical planner format is YYYY-YYYY, >=YYYY, or <=YYYY.
+            # The colon forms remain accepted for replaying older artifacts
+            # (YYYY:YYYY, YYYY:, and :YYYY).
+            range_match = re.search(r"(\d{4})\s*(?:-|:|to|~|至)\s*(\d{4})", expected, flags=re.I)
+            lower_match = re.search(r">=\s*(\d{4})", expected)
+            upper_match = re.search(r"<=\s*(\d{4})", expected)
+            legacy_lower = re.fullmatch(r"\s*(\d{4})\s*:\s*", expected)
+            legacy_upper = re.fullmatch(r"\s*:\s*(\d{4})\s*", expected)
+            if range_match:
+                ok = int(range_match.group(1)) <= observed_year <= int(range_match.group(2))
+            elif lower_match or legacy_lower:
+                lower = int((lower_match or legacy_lower).group(1))
+                ok = observed_year >= lower
+            elif upper_match or legacy_upper:
+                upper = int((upper_match or legacy_upper).group(1))
+                ok = observed_year <= upper
             else:
                 years = {int(value) for value in re.findall(r"\d{4}", expected)}
-                ok = int(year) in years if years else None
+                ok = observed_year in years if years else None
             return _constraint_result(name, expected, "unknown" if ok is None else ("pass" if ok else "fail"), "year_match" if ok else ("year_mismatch" if ok is False else "year_unparseable"), year)
         if "full" in lname or "全文" in lname or "evidence" in lname:
             required = expected.casefold()

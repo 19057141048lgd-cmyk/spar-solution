@@ -77,7 +77,7 @@ def _subquery(subquery_id: str, kind: str, text: str, iteration: int = 0, parent
         "parent_id": parent_id,
         "kind": kind,
         "query_text": text,
-        "source_capabilities": ["arxiv", "openalex", "local_library"],
+        "source_capabilities": ["arxiv", "openalex", "bohrium", "local_library"],
         "iteration": iteration,
     }
 
@@ -168,7 +168,15 @@ class QueryPlanner:
         hard: list[dict[str, str]] = []
         soft: list[dict[str, str]] = [_constraint("evidence", "prefer", "abstract_or_fulltext")]
         if start is not None or end is not None:
-            hard.append(_constraint("time_range", "between", f"{start or ''}:{end or ''}"))
+            # Use an unambiguous value format for the gate. Keep the operator
+            # stable for older consumers; the value carries open-bound semantics.
+            if start is not None and end is not None:
+                time_value = f"{start}-{end}"
+            elif start is not None:
+                time_value = f">={start}"
+            else:
+                time_value = f"<={end}"
+            hard.append(_constraint("time_range", "between", time_value))
         if "only open access" in query.casefold() or "open-access" in query.casefold():
             hard.append(_constraint("access", "equals", "open_access"))
         if applications:
@@ -192,8 +200,8 @@ class QueryPlanner:
             "time_range": {"start_year": start, "end_year": end, "source": "explicit" if start or end else "unspecified"},
             "hard_constraints": hard,
             "soft_constraints": soft,
-            "source_capabilities": ["arxiv", "openalex", "local_library"],
-            "budget": {"max_iterations": 2, "max_citation_depth": 1, "max_subqueries_per_gap": 2, "max_provider_calls": 20},
+            "source_capabilities": ["arxiv", "openalex", "bohrium", "local_library"],
+            "budget": {"max_iterations": 2, "max_citation_depth": 1, "max_subqueries_per_gap": 2, "max_provider_calls": 20, "max_llm_calls": 10},
             "stop_strategy": {"min_new_relevant": 2, "min_subquery_coverage": 0.8, "min_evidence_coverage": 0.7},
             "subqueries": subqueries,
             "gaps": gaps,

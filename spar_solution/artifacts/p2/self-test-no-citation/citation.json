@@ -14,5 +14,21 @@
       "papers": 0,
       "source_errors": 0
     }
+  },
+  {
+    "calls": [],
+    "edges": [],
+    "papers": [],
+    "source_errors": [],
+    "stats": {
+      "ablation": "citation_disabled",
+      "api_calls": 0,
+      "edges": 0,
+      "eligible_seeds": 0,
+      "enabled": false,
+      "max_depth": 1,
+      "papers": 0,
+      "source_errors": 0
+    }
   }
 ]

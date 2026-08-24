@@ -2,6 +2,7 @@
   "budget": {
     "max_citation_depth": 1,
     "max_iterations": 2,
+    "max_llm_calls": 10,
     "max_provider_calls": 20,
     "max_subqueries_per_gap": 2
   },
@@ -28,6 +29,7 @@
   "source_capabilities": [
     "arxiv",
     "openalex",
+    "bohrium",
     "local_library"
   ],
   "stop_strategy": {
@@ -44,9 +46,68 @@
       "source_capabilities": [
         "arxiv",
         "openalex",
+        "bohrium",
+        "local_library"
+      ],
+      "sources": [
+        "arxiv",
+        "openalex",
+        "bohrium",
         "local_library"
       ],
       "subquery_id": "sq_topic_01"
+    },
+    {
+      "iteration": 1,
+      "kind": "method",
+      "parent_id": "sq_topic_01",
+      "query_text": "wifi heart rate monitoring methods techniques algorithms",
+      "source_capabilities": [
+        "arxiv",
+        "openalex",
+        "bohrium",
+        "local_library"
+      ],
+      "subquery_id": "sq_missing_method_01"
+    },
+    {
+      "iteration": 1,
+      "kind": "dataset",
+      "parent_id": "sq_topic_01",
+      "query_text": "wifi heart rate monitoring datasets benchmarks",
+      "source_capabilities": [
+        "arxiv",
+        "openalex",
+        "bohrium",
+        "local_library"
+      ],
+      "subquery_id": "sq_missing_dataset_01"
+    },
+    {
+      "iteration": 1,
+      "kind": "constraint",
+      "parent_id": "sq_topic_01",
+      "query_text": "wifi heart rate monitoring publication year date",
+      "source_capabilities": [
+        "arxiv",
+        "openalex",
+        "bohrium",
+        "local_library"
+      ],
+      "subquery_id": "sq_missing_time_range_01"
+    },
+    {
+      "iteration": 1,
+      "kind": "comparison",
+      "parent_id": "sq_topic_01",
+      "query_text": "wifi heart rate monitoring applications use cases",
+      "source_capabilities": [
+        "arxiv",
+        "openalex",
+        "bohrium",
+        "local_library"
+      ],
+      "subquery_id": "sq_missing_application_01"
     }
   ],
   "tasks": [

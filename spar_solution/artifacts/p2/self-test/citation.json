@@ -2,8 +2,9 @@
   {
     "calls": [
       {
+        "api_calls": 1,
         "depth": 1,
-        "latency_ms": 0.151,
+        "latency_ms": 0.396,
         "ok": true,
         "paper_id": "fixture:seed",
         "records": 1,
@@ -110,12 +111,31 @@
     "stats": {
       "ablation": null,
       "api_calls": 1,
+      "budget_skipped": 0,
       "edges": 1,
       "eligible_seeds": 1,
       "enabled": true,
       "iteration": 0,
       "max_depth": 1,
       "papers": 1,
+      "source_errors": 0
+    }
+  },
+  {
+    "calls": [],
+    "edges": [],
+    "papers": [],
+    "source_errors": [],
+    "stats": {
+      "ablation": null,
+      "api_calls": 0,
+      "budget_skipped": 0,
+      "edges": 0,
+      "eligible_seeds": 0,
+      "enabled": true,
+      "iteration": 1,
+      "max_depth": 1,
+      "papers": 0,
       "source_errors": 0
     }
   }

@@ -51,6 +51,16 @@ class FakeTransport:
         return TransportResponse(self.status, json.dumps(_envelope(content)))
 
 
+class SequentialTransport:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def __call__(self, method, url, headers, body, timeout):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
 class DeepSeekLayerTests(unittest.TestCase):
     def test_plan_is_structured_and_contains_multiple_queries_constraints_time_sources(self):
         transport = FakeTransport([_plan_response()])
@@ -119,6 +129,20 @@ class DeepSeekLayerTests(unittest.TestCase):
         with self.assertRaises(DeepSeekSchemaError):
             layer.judge(layer.plan("WiFi heart rate"), [paper])
 
+    def test_judgement_rejects_missing_candidate_and_invalid_score(self):
+        first = _paper("arxiv", "WiFi heart rate")
+        first["paper_id"] = "arxiv:one"
+        second = _paper("arxiv", "WiFi pulse")
+        second["paper_id"] = "arxiv:two"
+        missing = {"results": [{"paper_id": first["paper_id"], "relevance_score": 0.8}]}
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([_plan_response(), missing])))
+        with self.assertRaises(DeepSeekSchemaError):
+            layer.judge(layer.plan("WiFi heart rate"), [first, second])
+        invalid = {"results": [{"paper_id": first["paper_id"], "relevance_score": "bad", "relevance_label": "nonsense"}]}
+        layer = DeepSeekUnderstandingLayer(DeepSeekClient(transport=FakeTransport([_plan_response(), invalid])))
+        with self.assertRaises(DeepSeekSchemaError):
+            layer.judge(layer.plan("WiFi heart rate"), [first])
+
     def test_missing_key_is_explicit_and_does_not_leak_secret(self):
         secret = "sk-test-not-to-leak-123456789"
         client = DeepSeekClient(api_key="", base_url="https://example.invalid")
@@ -139,6 +163,46 @@ class DeepSeekLayerTests(unittest.TestCase):
             DeepSeekClient(api_key="secret", transport=transport).complete_json("system", "user")
         self.assertEqual(context.exception.status_code, 401)
         self.assertNotIn("secret", str(context.exception))
+
+    def test_usage_accumulates_provider_token_counts(self):
+        first = _envelope(_plan_response())
+        first["usage"] = {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+        second = _envelope({"ok": True})
+        second["usage"] = {"prompt_tokens": 3, "completion_tokens": 2}
+        transport = SequentialTransport([TransportResponse(200, json.dumps(first)), TransportResponse(200, json.dumps(second))])
+        client = DeepSeekClient(transport=transport)
+        client.complete_json("system", "user")
+        client.complete_json("system", "user")
+        self.assertEqual(client.usage["calls"], 2)
+        self.assertEqual(client.usage["prompt_tokens"], 13)
+        self.assertEqual(client.usage["completion_tokens"], 6)
+        self.assertEqual(client.usage["total_tokens"], 19)
+        self.assertEqual(client.usage["failures"], 0)
+
+    def test_retryable_http_status_retries_once(self):
+        ok = _envelope({"ok": True})
+        ok["usage"] = {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+        transport = SequentialTransport([TransportResponse(429, "{}"), TransportResponse(200, json.dumps(ok))])
+        client = DeepSeekClient(transport=transport)
+        self.assertEqual(client.complete_json("system", "user"), {"ok": True})
+        self.assertEqual(client.usage["calls"], 2)
+        self.assertEqual(client.usage["failures"], 1)
+
+    def test_call_budget_prevents_retry_from_exceeding_limit(self):
+        transport = SequentialTransport([TransportResponse(500, "{}")])
+        client = DeepSeekClient(transport=transport)
+        client.reset_usage(max_calls=1)
+        with self.assertRaises(DeepSeekCallError) as context:
+            client.complete_json("system", "user")
+        self.assertEqual(context.exception.code, "budget")
+        self.assertEqual(client.usage["calls"], 1)
+
+    def test_invalid_response_json_counts_as_failure(self):
+        client = DeepSeekClient(transport=SequentialTransport([TransportResponse(200, "not-json")]))
+        with self.assertRaises(DeepSeekCallError):
+            client.complete_json("system", "user")
+        self.assertEqual(client.usage["calls"], 1)
+        self.assertEqual(client.usage["failures"], 1)
 
 
 if __name__ == "__main__":
