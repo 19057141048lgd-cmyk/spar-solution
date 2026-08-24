@@ -1,0 +1,7 @@
+id,item,status,done_at,notes
+1,读取并验证老师改进计划与现状,DONE,2026-08-24T20:30:00+08:00,审查 Agent 已逐项确认 A-1 至 C-4 的当前状态
+2,修复 A 批次时间约束、停止条件、OpenAlex 空结果和可信基线,DONE,2026-08-24T21:00:00+08:00,A-1/A-2/A-3 完成；A-4 宽召回已在前序提交，可信 smoke CLI 归入最终联调
+3,修复 B 批次 Gold、年份过滤、重复评分、统一指标和文档,DONE,2026-08-24T21:20:00+08:00,Gold/重复评分/统一指标/文档完成；OpenAlex 年份与 relations 合并由 C Provider Agent 处理
+4,修复 C 批次真实引用、DeepSeek 主流程、Token 计量和最终输出,IN_PROGRESS,,拆成 Provider 引用、DeepSeek 成本、可信 smoke 和最终输出四个实现任务
+5,运行全量测试并使用全新只读 Agent 独立验收,TODO,,
+6,更新任务日志并提交 Git 版本,TODO,,
