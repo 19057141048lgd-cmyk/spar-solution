@@ -209,7 +209,7 @@ class SearchTreeRunner:
         relevance_threshold: float = 0.75,
         page_size: int = 10,
         max_provider_calls: int = 40,
-        max_llm_calls: int = 20,
+        max_llm_calls: int = 50,
         expand_mode: str = "openalex",
         fulltext_cache: "str | Path | None" = None,
         max_judge_papers: "int | None" = None,
@@ -224,6 +224,12 @@ class SearchTreeRunner:
             raise ValueError("max_judge_papers must be a non-negative integer or null")
         if not 0 <= relevance_threshold <= 1:
             raise ValueError("relevance_threshold must be between 0 and 1")
+        # LLM 调用硬顶 20→50（2026-08-26 用户裁定：不限 token、命中率优先）：
+        # 判分放开（max_judge_papers=None）后单题池 100-250 篇全量判断就要
+        # 10-25 次调用，20 次硬顶会在 L0 把预算吃光，L1 的消歧续搜/深层查询
+        # 生成全部退规则模板（sentinel-calib-validation test_0 实锤：判了
+        # 254 篇、llm_calls=20 打满、L1 查询是 gap 模板兜底）。调用数不是
+        # token 上限，提高它符合"不限 token"的裁定方向。
         self.providers = providers
         self.understanding_layer = understanding_layer
         self.max_depth = int(max_depth)
