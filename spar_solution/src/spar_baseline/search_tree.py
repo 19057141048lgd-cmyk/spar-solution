@@ -143,7 +143,7 @@ class SearchTreeRunner:
         relevance_threshold: float = 0.75,
         page_size: int = 10,
         max_provider_calls: int = 30,
-        max_llm_calls: int = 12,
+        max_llm_calls: int = 20,
     ) -> None:
         if max_depth < 1 or queries_per_level < 1 or page_size < 1:
             raise ValueError("max_depth, queries_per_level and page_size must be positive")
