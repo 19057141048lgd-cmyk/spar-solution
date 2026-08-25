@@ -208,7 +208,10 @@ class SearchTreeRunner:
         docs_to_expand: int = 16,
         relevance_threshold: float = 0.75,
         page_size: int = 10,
-        max_provider_calls: int = 40,
+        # provider 上限 40→60（2026-08-26：hybrid 点名在 L0 烧光 44 次调用，
+        # L1 整层饿死——sentinel-budgetfix test_0 实锤 levels=1、provider_calls=44）。
+        # 60 是效率红线值，命中率优先阶段先用满红线再谈省。
+        max_provider_calls: int = 60,
         max_llm_calls: int = 50,
         expand_mode: str = "openalex",
         fulltext_cache: "str | Path | None" = None,
