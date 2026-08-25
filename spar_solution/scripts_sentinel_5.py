@@ -59,8 +59,10 @@ def main() -> int:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--expand-mode", default="openalex", choices=("openalex", "hybrid", "fulltext"))
     parser.add_argument("--sleep", type=float, default=3.0)
+    parser.add_argument("--qids", default=None, help="逗号分隔的题组覆盖（≤5 题）；缺省用冻结哨兵集")
     args = parser.parse_args()
-    assert len(SENTINEL_QIDS) <= MAX_QUERIES
+    qids = tuple(q.strip() for q in args.qids.split(",") if q.strip()) if args.qids else SENTINEL_QIDS
+    assert len(qids) <= MAX_QUERIES, "单轮永远 ≤5 题（铁律）"
 
     rows = {str(r["qid"]): r for r in load_rows(DATASET, offset=0, limit=50)}
     pipeline = build_live_pipeline(citation_enabled=True, page_size=10)
@@ -71,7 +73,7 @@ def main() -> int:
     out_root.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     per_query, totals = [], {"api": 0, "llm": 0, "tokens": 0, "wall_ms": 0.0}
-    for index, qid in enumerate(SENTINEL_QIDS):
+    for index, qid in enumerate(qids):
         row = rows[qid]
         result = runner.run(str(row["question"]))
         qdir = out_root / qid
@@ -89,8 +91,8 @@ def main() -> int:
         delta = None if old is None else round(new["pasa"]["recall_20_recall"] - old["pasa"]["recall_20_recall"], 3)
         per_query.append({"qid": qid, "new": new, "old": old, "delta_r20": delta, "stats": stats, "stop_reason": result.get("stop_reason")})
         base_r20 = f"{old['pasa']['recall_20_recall']:.2f}" if old else "-"
-        print(f"[{index+1}/5] {qid}: r20 {new['pasa']['recall_20_recall']:.2f} (基线 {base_r20}) crawl {new['pasa']['crawler_recall']:.2f} | api={stats.get('provider_calls')} llm={stats.get('llm_calls')} tokens={stats.get('llm_total_tokens')}", flush=True)
-        if index + 1 < len(SENTINEL_QIDS):
+        print(f"[{index+1}/{len(qids)}] {qid}: r20 {new['pasa']['recall_20_recall']:.2f} (基线 {base_r20}) crawl {new['pasa']['crawler_recall']:.2f} | api={stats.get('provider_calls')} llm={stats.get('llm_calls')} tokens={stats.get('llm_total_tokens')}", flush=True)
+        if index + 1 < len(qids):
             time.sleep(max(0.0, args.sleep))
 
     def macro(items, path):
@@ -101,7 +103,8 @@ def main() -> int:
         "schema_version": "sentinel.v1",
         "run_name": args.run_name,
         "expand_mode": args.expand_mode,
-        "qids": list(SENTINEL_QIDS),
+        "qids": list(qids),
+        "sentinel_default": list(SENTINEL_QIDS) if qids == SENTINEL_QIDS else [],
         "new_macro": {
             "recall_20": macro([q["new"]["pasa"] for q in per_query], "recall_20_recall"),
             "recall_50": macro([q["new"]["pasa"] for q in per_query], "recall_50_recall"),
