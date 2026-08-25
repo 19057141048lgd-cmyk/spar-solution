@@ -133,6 +133,17 @@ def _title_matches(candidate_title: str, pick_query: str, *, min_overlap: float 
     return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens)) >= min_overlap
 
 
+# 综述识别：AutoScholarQuery 的问题措辞常来自综述的分类学术语，金标论文
+# 聚集在综述的参考文献列表里——综述是指路牌，扩展阶段必须优先读它。
+# "review" 有误报（如 peer review 论文），代价只是扩展排序靠前，可接受。
+_SURVEY_TITLE_RE = re.compile(r"\b(survey|surveys|overview|tutorial|review)\b", re.IGNORECASE)
+
+
+def _is_survey(paper: Mapping[str, Any]) -> bool:
+    title = str((paper.get("bibliography") or {}).get("title") or "")
+    return bool(_SURVEY_TITLE_RE.search(title))
+
+
 def _seed_relevance(paper: Mapping[str, Any]) -> float:
     """扩展资格/停止判断用的相关分：词法兜底论文取折扣前原始分。"""
 
@@ -315,12 +326,16 @@ class SearchTreeRunner:
         lexical_plan: Mapping[str, Any] | None,
         errors: list[dict[str, Any]],
         level: int,
+        junk_titles: Sequence[str] = (),
     ) -> list[str]:
-        """垃圾池重写：第 0 层无高相关论文时，让 LLM 换术语重写检索式。
+        """垃圾池领域觉醒：第 0 层无高相关论文时，让 LLM 推断题目黑话的
+        出处领域并用该领域行话重写检索式。
 
         与 _generate_deep_queries 的区别：不从已找到论文派生（垃圾池没有
-        可派生的对象），而是要求模型换角度/换术语/更具体地重述问题。
-        失败退规则 gap 模板。
+        可派生的对象），而是把搜回来的错领域论文标题作为证据喂给 LLM：
+        "问题的措辞可能出自某个领域综述的方法分类表（如 reconstruction-
+        based 是时序异常检测综述的族名），推断那是哪个领域，用该领域的
+        术语+综述定位查询重搜"。失败退规则 gap 模板。
         """
 
         layer = self.understanding_layer
@@ -328,17 +343,22 @@ class SearchTreeRunner:
         if layer is not None and self._llm_budget_left() and callable(getattr(client, "complete_json", None)):
             system = (
                 "You are an academic literature search expert. The previous queries retrieved "
-                "nothing relevant. Rephrase the question into short retrieval queries using "
-                "DIFFERENT terminology, more specific technical terms, and remove any "
-                "conversational phrasing. Return JSON only: "
+                "nothing relevant — the retrieved titles below are from the WRONG field. The "
+                "question's wording very likely comes from a SURVEY's method taxonomy of some "
+                "field (phrases like 'reconstruction-based', 'contrastive', 'hybrid architectures' "
+                "are family names used inside that field's surveys, and papers in that field may "
+                "never use these exact words). Infer which field's survey taxonomy the question "
+                "borrows from, then write 1-2 short keyword queries in THAT field's own terminology, "
+                "plus one survey-finding query for it (e.g. '<field> survey'). Return JSON only: "
                 '{"queries": [{"query_text": "..."}]}. Never invent paper facts.'
             )
             user = json.dumps(
                 {
                     "task": "rephrase_query",
                     "query": query,
+                    "wrong_field_titles_sample": [str(t)[:160] for t in junk_titles[:5]],
                     "searched_queries": sorted(searched_norm),
-                    "required": {"queries": "1-2 objects, each with a short keyword-style query_text"},
+                    "required": {"queries": "2-3 objects, each with a short keyword-style query_text"},
                 },
                 ensure_ascii=False,
             )
@@ -351,7 +371,7 @@ class SearchTreeRunner:
                 ]
                 fresh = [text for text in fresh if text and _norm_query(text) not in searched_norm]
                 if fresh:
-                    return fresh[: self.queries_per_level]
+                    return fresh[: max(3, self.queries_per_level)]
             except _LLM_ERRORS as exc:
                 errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "rephrase_fallback")), "message": str(exc)[:200], "stage": f"rephrase_L{level}"})
         # 规则兜底：计划里未被搜过的其他子查询，或 gap 模板。
@@ -488,6 +508,8 @@ class SearchTreeRunner:
             except (KeyError, TypeError, ValueError):
                 score = float("nan")
             provenance = paper.setdefault("provenance", {})
+            if _is_survey(paper):
+                provenance["paper_kind"] = "survey"
             if score == score:  # LLM 判断生效
                 provenance["relevance_source"] = "llm"
                 raw = score
@@ -538,7 +560,7 @@ class SearchTreeRunner:
         if not self._llm_budget_left():
             return None, 0
         self._llm_calls += 1
-        picks = pick_references(client, query, fulltext, max_picks=4)
+        picks = pick_references(client, query, fulltext, max_picks=6 if _is_survey(seed) else 4)
         if not picks:
             return None, 1
         seed_id = str(seed.get("paper_id"))
@@ -682,7 +704,11 @@ class SearchTreeRunner:
                 else:
                     # 垃圾池二 chance：第 0 层没有任何高相关论文时，换术语重写
                     # 查询再搜一层，而不是直接 no_relevant_papers 停死。
-                    level_queries = self._rephrase_queries(query, searched_norm, base_plan, lexical_plan, errors, level)
+                    junk_titles = [
+                        str((paper.get("bibliography") or {}).get("title") or "")
+                        for paper in sorted(pool, key=lambda item: -_seed_relevance(item))[:5]
+                    ]
+                    level_queries = self._rephrase_queries(query, searched_norm, base_plan, lexical_plan, errors, level, junk_titles=junk_titles)
                 level_queries = [_sanitize_query(text) for text in level_queries]
             level_queries = [
                 text
@@ -736,7 +762,9 @@ class SearchTreeRunner:
 
             # -- 5. 引用扩展：高相关论文按分取前 docs_to_expand 篇 --
             candidates = [paper for paper in pool if _seed_relevance(paper) >= self.relevance_threshold and str(paper.get("paper_id")) not in expanded_ids]
-            candidates.sort(key=lambda paper: (-_seed_relevance(paper), str(paper.get("paper_id"))))
+            # 综述优先当扩展种子：综述的参考文献是金标聚集地（题目黑话的
+            # 出处），同等资格下综述排最前；分数稍低的综述也值得读。
+            candidates.sort(key=lambda paper: (not _is_survey(paper), -_seed_relevance(paper), str(paper.get("paper_id"))))
             if not candidates:
                 # 兜底种子：没有 >=0.75 的论文时，只要池子大体在题（最高分
                 # >=0.3）且有摘要，就取融合分 top-3 扩引用，避免引用链饿死；
@@ -750,6 +778,19 @@ class SearchTreeRunner:
                 ]
                 best_effort.sort(key=lambda paper: (-_seed_relevance(paper), str(paper.get("paper_id"))))
                 candidates = best_effort[:3]
+            # 综述保底名额：池中有带摘要、分数 >=0.3 的综述但没进候选时，
+            # 强制补进前 2 个种子位——哪怕它分数不如普通论文。
+            candidate_ids = {str(paper.get("paper_id")) for paper in candidates}
+            reserved_surveys = [
+                paper
+                for paper in pool
+                if _is_survey(paper)
+                and _seed_relevance(paper) >= 0.3
+                and str((paper.get("bibliography") or {}).get("abstract") or "").strip()
+                and str(paper.get("paper_id")) not in candidate_ids
+                and str(paper.get("paper_id")) not in expanded_ids
+            ][:2]
+            candidates[:0] = reserved_surveys
             candidates = candidates[: self.docs_to_expand]
             citation_calls = 0
             child_records: list[dict[str, Any]] = []
@@ -840,8 +881,12 @@ class SearchTreeRunner:
                 stop_reason = STOP_NO_NEW_PAPERS
                 break
             if not any(_seed_relevance(paper) >= self.relevance_threshold for paper in pool):
-                stop_reason = STOP_NO_RELEVANT_PAPERS
-                break
+                # L0 不停死：垃圾池留给 L1 的领域觉醒重搜（原设计的"二
+                # chance"此前被本条在 L0 末尾拦截，从未真正生效——L0 全垃圾
+                # 的题（如 test_0）因此直接死掉，消歧/重搜全没机会跑）。
+                if level > 0:
+                    stop_reason = STOP_NO_RELEVANT_PAPERS
+                    break
         else:
             stop_reason = STOP_MAX_DEPTH
 

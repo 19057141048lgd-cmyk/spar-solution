@@ -235,8 +235,9 @@ class SearchTreeRunnerTests(unittest.TestCase):
         provider = FixtureProvider("arxiv", [seed], {seed["paper_id"]: [_child()]})
         result = SearchTreeRunner({"arxiv": provider}).run("quantum error correction benchmark")
 
-        self.assertEqual(result["stop_reason"], "no_relevant_papers")
-        self.assertEqual(result["stats"]["levels"], 1)
+        # L0 全垃圾不再当场死：先给 L1 一次换词重搜，仍无相关才停。
+        self.assertEqual(result["stop_reason"], "no_new_papers")
+        self.assertEqual(result["stats"]["levels"], 2)
         self.assertEqual(provider.relation_calls, 0)
         self.assertEqual(result["edges"], [])
         self.assertEqual(result["nodes"][0]["new_relevant"], 0)
@@ -520,3 +521,93 @@ class DisambiguateQueriesTests(unittest.TestCase):
         result = SearchTreeRunner({"arxiv": provider}, max_depth=1).run(QUERY)
         self.assertEqual(result["nodes"][0]["queries"], ["wifi csi heart rate monitoring"])
         self.assertEqual(result["stats"]["llm_calls"], 0)
+
+
+def _survey(paper_id="fixture:survey", doi="10.1234/tree.survey"):
+    paper = _fixture_paper(
+        paper_id,
+        doi,
+        "A Survey of WiFi CSI Heart Rate Monitoring Methods",
+        "Survey of wifi csi heart rate monitoring and contactless vital sign estimation methods including reconstruction based approaches.",
+    )
+    return paper
+
+
+class SurveyPriorityTests(unittest.TestCase):
+    """综述优先扩展：综述是指路牌，参考文献是金标聚集地。"""
+
+    def test_survey_paper_marked_in_judging(self):
+        provider = FixtureProvider("arxiv", [_survey()])
+        result = SearchTreeRunner({"arxiv": provider}, max_depth=1).run(QUERY)
+        papers = {p["paper_id"]: p for p in result["papers"]}
+        self.assertEqual(papers["fixture:survey"]["provenance"].get("paper_kind"), "survey")
+
+    def test_survey_expanded_before_higher_scored_normal_paper(self):
+        survey = _survey()  # 词法分与普通种子接近但标题不同
+        normal = _fixture_paper(
+            "fixture:normal",
+            "10.1234/tree.normal",
+            "WiFi CSI heart rate monitoring system",
+            "WiFi CSI heart rate monitoring system for contactless vital sign estimation with hybrid architectures.",
+        )
+        # normal 的词法分更高（题面词全覆盖），但综述必须先被扩展。
+        provider = RelationCountingProvider(
+            "arxiv", [survey, normal], {p["paper_id"]: [_child()] for p in (survey, normal)}
+        )
+        result = SearchTreeRunner({"arxiv": provider}, max_depth=1).run(QUERY)
+        self.assertEqual(result["edges"][0]["parent"], survey["paper_id"])
+        self.assertEqual(provider.relation_targets[0], survey["paper_id"])
+
+    def test_low_scored_survey_reserved_as_seed(self):
+        # 综述词法分只有 0.3-0.4（低于 0.75 阈值），普通论文分数也不足
+        # 阈值触发 best_effort；综述保底名额必须让它进入扩展。
+        survey = _survey()
+        # 词法分压到 0.4（2/5 查询词）：低于 0.75 阈值但高于 0.3 保底线。
+        survey["bibliography"]["abstract"] = "Broad overview of heart rate estimation with little else from the question."
+        junk = _fixture_paper(
+            "fixture:junk",
+            "10.1234/junk.9",
+            "Dynamics of controlled hybrid systems",
+            "Control theory stability for switched systems with no query words at all here.",
+        )
+        normal = _fixture_paper(
+            "fixture:normal2",
+            "10.1234/tree.normal2",
+            "WiFi CSI heart rate monitoring system",
+            "WiFi CSI heart rate monitoring system for contactless vital sign estimation.",
+        )
+        provider = RelationCountingProvider(
+            "arxiv", [junk, normal, survey], {p["paper_id"]: [_child()] for p in (survey, normal)}
+        )
+        result = SearchTreeRunner({"arxiv": provider}, max_depth=1, relevance_threshold=0.75).run(QUERY)
+        # normal 过阈值、survey 只有 0.4：综述保底名额必须让 survey 先被扩展。
+        self.assertEqual(provider.relation_targets[0], survey["paper_id"])
+
+    def test_domain_awakening_rephrase_sends_junk_titles(self):
+        captured = {}
+
+        class CapturingTransport:
+            def __call__(self, method, url, headers, body, timeout):
+                request = json.loads(body)
+                user = json.loads(request["messages"][1]["content"])
+                if user.get("task") == "rephrase_query":
+                    captured.update(user)
+                    content = {"queries": [{"query_text": "anomaly detection survey"}, {"query_text": "reconstruction based anomaly detection"}]}
+                elif user.get("task") == "decompose_query":
+                    content = {"queries": ["wifi csi heart rate monitoring"], "source_capabilities": ["arxiv"]}
+                else:
+                    content = {"results": []}
+                envelope = {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+                return TransportResponse(200, json.dumps(envelope))
+
+        junk = _fixture_paper(
+            "fixture:junk2",
+            "10.1234/junk.2",
+            "Hybrid Branching Time Logics Survey",
+            "Nothing relevant to the question at all, purely wrong field filler text.",
+        )
+        provider = FixtureProvider("arxiv", [junk], {})
+        result = SearchTreeRunner({"arxiv": provider}, _scripted_layer(CapturingTransport())).run(QUERY)
+        self.assertIn("wrong_field_titles_sample", captured)
+        self.assertTrue(any("Hybrid" in str(t) for t in captured["wrong_field_titles_sample"]))
+        self.assertIn("anomaly detection survey", [q for node in result["nodes"] for q in node["queries"]])
