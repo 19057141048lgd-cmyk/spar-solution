@@ -41,3 +41,32 @@ class TitleMatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DownloadDeadlineTests(unittest.TestCase):
+    """总时限护栏：慢滴流服务器不得挂死整条管线。"""
+
+    def test_slow_drip_response_is_cut_off(self):
+        from spar_solution.src.spar_baseline.fulltext import _read_capped
+
+        class SlowDrip:
+            def read(self, n):
+                return b"x"  # 每次只回 1 字节，永不结束
+
+        with self.assertRaises(TimeoutError):
+            _read_capped(SlowDrip(), max_bytes=10_000_000, deadline_s=0.2)
+
+    def test_normal_read_within_deadline(self):
+        from spar_solution.src.spar_baseline.fulltext import _read_capped
+
+        class Full:
+            def __init__(self):
+                self.left = 100
+
+            def read(self, n):
+                out = b"a" * min(n, self.left)
+                self.left -= len(out)
+                return out or b""
+
+        data = _read_capped(Full(), max_bytes=100, deadline_s=5.0)
+        self.assertEqual(len(data), 100)

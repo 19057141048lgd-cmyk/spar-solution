@@ -574,7 +574,8 @@ _JUDGE_SYSTEM_PROMPT = (
     "You are an academic paper relevance judge. Return JSON only. Judge only supplied PaperDoc facts; do not invent metadata. Keep each reason under 40 words.\n"
     "Score every candidate strictly against this rubric:\n"
     "- 0.90-1.00: primary research that directly answers the research question (its methods/objects precisely match what the question asks).\n"
-    "- 0.70-0.89: highly relevant: same core topic, but the angle is slightly off.\n"
+    "- 0.70-0.89: same core area but NOT a direct answer to THIS question. Within this band use 0.85-0.89 only if the paper plausibly answers part of the question, 0.70-0.79 for adjacent work. Do NOT cluster many papers at the same score: the question asks which papers actually answer it.\n"
+
     "- 0.40-0.69: partially relevant: shares methods or datasets but studies a different research question.\n"
     "- 0.10-0.39: weakly relevant: only broad field overlap (e.g. both are NLP).\n"
     "- 0.00-0.09: irrelevant.\n"

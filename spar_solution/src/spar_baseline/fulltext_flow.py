@@ -71,9 +71,22 @@ class FulltextFlowError(RuntimeError):
 
 
 def _get(url: str, *, timeout: float = 30.0, max_bytes: int = 6 * 1024 * 1024) -> bytes:
+    from time import monotonic
+
     request = Request(url, headers={"User-Agent": "spar-fulltext-flow/1.0"})
+    deadline = monotonic() + timeout * 3  # 总时限：防慢滴流服务器挂死（见 fulltext._read_capped）
     with urlopen(request, timeout=timeout) as response:  # nosec B310: 学术公开页
-        data = response.read(max_bytes + 1)
+        chunks = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            if monotonic() > deadline:
+                raise FulltextFlowError("download deadline exceeded")
+            chunk = response.read(min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
     if len(data) > max_bytes:
         raise FulltextFlowError("content exceeds size cap")
     return data

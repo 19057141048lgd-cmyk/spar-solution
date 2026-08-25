@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable, Mapping, Sequence
 from urllib.request import Request, urlopen
 
@@ -41,13 +42,32 @@ def _safe_name(value: str) -> str:
     return _SAFE_NAME.sub("_", str(value)).strip("._")[:120] or "paper"
 
 
+def _read_capped(response: Any, max_bytes: int, deadline_s: float) -> bytes:
+    """分块读取并受总时限约束：socket 超时只管单包间隔，慢滴流服务器可以
+    让整段 read() 无限挂起（sentinel-calibrated-hybrid 实测单题卡死 45+
+    分钟）。超总时限抛 TimeoutError，调用方按下载失败跳过。"""
+
+    deadline = time.monotonic() + deadline_s
+    chunks: list[bytes] = []
+    remaining = max_bytes
+    while remaining > 0:
+        if time.monotonic() > deadline:
+            raise TimeoutError("download deadline exceeded")
+        chunk = response.read(min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _fetch(url: str, *, timeout: float, max_bytes: int, opener: Callable[[str, float], bytes] | None = None) -> bytes:
     """下载限制在 max_bytes 内；opener 可注入便于离线测试。"""
 
     def default(open_url: str, open_timeout: float) -> bytes:
         request = Request(open_url, headers={"User-Agent": "spar-fulltext/1.0"})
         with urlopen(request, timeout=open_timeout) as response:  # nosec B310: 论文 OA PDF 链接
-            return response.read(max_bytes + 1)
+            return _read_capped(response, max_bytes + 1, deadline_s=open_timeout * 3)
 
     data = (opener or default)(url, timeout)
     if len(data) > max_bytes:

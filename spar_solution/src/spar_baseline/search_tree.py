@@ -391,6 +391,60 @@ class SearchTreeRunner:
             evolved = None
         return _plan_queries(evolved, self.queries_per_level) if evolved is not None else []
 
+    def _uncovered_reading_queries(
+        self,
+        query: str,
+        searched_norm: set[str],
+        junk_titles: Sequence[str],
+        errors: list[dict[str, Any]],
+        level: int,
+    ) -> list[str]:
+        """消歧续搜：列出 L0 已覆盖的解读，要求 LLM 给未覆盖解读的查询。
+
+        关键提示是方法族命名：题目的族名词（reconstruction-based 等）几乎
+        总是某个特定领域综述的分类术语——要求模型回答"哪个领域的综述用
+        这个词当分类名、该领域的论文会怎么称呼这类方法"。1 次 LLM 调用；
+        失败返回 []。
+        """
+
+        layer = self.understanding_layer
+        client = getattr(layer, "client", None)
+        if layer is None or not self._llm_budget_left() or not callable(getattr(client, "complete_json", None)):
+            return []
+        system = (
+            "You are an academic search strategist. The queries already tried (listed below) cover "
+            "some readings of the question, but the answer papers have NOT been found - the retrieved "
+            "titles are from wrong fields. The question's key phrase is very likely a METHOD-FAMILY "
+            "name used in a specific field's survey taxonomy (e.g. 'reconstruction-based' is a family "
+            "name in time-series anomaly detection surveys; 'contrastive' in representation learning). "
+            "Ask yourself: which field's surveys classify methods under this exact family name, where "
+            "the answering papers would never use the phrase itself? Produce 1-2 short keyword queries "
+            "in THAT field's own terminology (field words + the underlying technique), NOT repeating "
+            "already-tried readings. Return JSON only: "
+            '{"queries": [{"query_text": "..."}]}. Never invent paper facts.'
+        )
+        user = json.dumps(
+            {
+                "task": "uncovered_readings",
+                "query": query,
+                "searched_queries": sorted(searched_norm)[:12],
+                "wrong_field_titles_sample": [str(t)[:160] for t in junk_titles[:5]],
+                "required": {"queries": "1-2 objects with short keyword-style query_text"},
+            },
+            ensure_ascii=False,
+        )
+        try:
+            payload = self._call_llm(lambda: client.complete_json(system, user, max_tokens=400))
+        except _LLM_ERRORS as exc:
+            errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "uncovered_fallback")), "message": str(exc)[:200], "stage": "uncovered_L%d" % level})
+            return []
+        fresh = [
+            str(item.get("query_text") or item.get("query") or "").strip()
+            for item in (payload.get("queries") or [])
+            if isinstance(item, Mapping)
+        ]
+        return [text for text in fresh if text and _norm_query(text) not in searched_norm][:2]
+
     def _generate_deep_queries(
         self,
         query: str,
@@ -640,6 +694,7 @@ class SearchTreeRunner:
         provider_calls = 0
         search_calls = 0
         relation_calls = 0
+        used_disambiguation = False
 
         # 让真实 DeepSeek 客户端同步执行 LLM 硬顶（内部重试也不会超支）。
         client = getattr(self.understanding_layer, "client", None) if self.understanding_layer is not None else None
@@ -680,6 +735,7 @@ class SearchTreeRunner:
         # 照抄问题的计划查询；消歧失败/无 LLM 时行为不变。
         disambiguated = self._disambiguate_queries(query, errors)
         if disambiguated:
+            used_disambiguation = True
             level_queries = list(dict.fromkeys([*disambiguated, *level_queries]))
         # 任何来源的第 0 层查询（LLM 回显问句/规则兜底）都必须先净化；
         # 单词垃圾查询（规则兜底曾产出 "models"）直接丢弃。
@@ -695,6 +751,10 @@ class SearchTreeRunner:
             # -- 1. 本层查询（第 0 层已在上方生成；深层查询由 top 论文派生）--
             if level:
                 relevant_pool = [paper for paper in pool if _seed_relevance(paper) >= self.relevance_threshold]
+                junk_titles = [
+                    str((paper.get("bibliography") or {}).get("title") or "")
+                    for paper in sorted(pool, key=lambda item: -_seed_relevance(item))[:5]
+                ]
                 if relevant_pool:
                     relevant_pool.sort(key=lambda paper: (-_seed_relevance(paper), str(paper.get("paper_id"))))
                     unused = [paper for paper in relevant_pool if str(paper.get("paper_id")) not in query_seed_ids]
@@ -704,11 +764,16 @@ class SearchTreeRunner:
                 else:
                     # 垃圾池二 chance：第 0 层没有任何高相关论文时，换术语重写
                     # 查询再搜一层，而不是直接 no_relevant_papers 停死。
-                    junk_titles = [
-                        str((paper.get("bibliography") or {}).get("title") or "")
-                        for paper in sorted(pool, key=lambda item: -_seed_relevance(item))[:5]
-                    ]
                     level_queries = self._rephrase_queries(query, searched_norm, base_plan, lexical_plan, errors, level, junk_titles=junk_titles)
+                if used_disambiguation and level == 1:
+                    # 消歧续搜：错领域论文会拿字面高分堵死垃圾池触发条件
+                    # （survey-hybrid 轮 test_0 实锤：3D 重建论文被 LLM 打
+                    # 0.75+，觉醒永远轮不到）。只要 L0 用过消歧且 L1 还没
+                    # 搜过未覆盖解读，就强制再问一轮——重点提示方法族命名
+                    # （题目黑话的真正出处领域）。
+                    uncovered = self._uncovered_reading_queries(query, searched_norm, junk_titles, errors, level)
+                    if uncovered:
+                        level_queries = list(dict.fromkeys([*uncovered, *level_queries]))
                 level_queries = [_sanitize_query(text) for text in level_queries]
             level_queries = [
                 text
