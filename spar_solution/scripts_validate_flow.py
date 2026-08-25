@@ -49,13 +49,26 @@ def main() -> int:
     arxiv = ArxivProvider.from_config(dict(load_config()))
     openalex = OpenAlexProvider(dict(load_config()))
 
-    # ① 计划 + 检索 → 种子
-    try:
-        from src.spar_baseline.search_tree import _sanitize_query
+    # ① 计划 + 检索 → 种子（多种角查询：先识别领域，再出关键词式查询）
+    from src.spar_baseline.search_tree import _sanitize_query
 
+    try:
         plan = layer.plan(question)
         queries = [q for q in dict.fromkeys(_sanitize_query(s["query_text"]) for s in plan["subqueries"]) if len(q.split()) >= 2][:4]
         planner_source = "deepseek"
+        try:
+            angles = layer.client.complete_json(
+                "You are an academic search strategist. First infer the likely research FIELD of the question "
+                "(e.g. bandits/RL vs queueing theory vs NLP) to avoid terminology collisions, then produce 3 short "
+                "keyword queries from different angles in that field. Return JSON only: "
+                '{"queries": [{"query_text": "..."}]}.',
+                json.dumps({"question": question}, ensure_ascii=False),
+                max_tokens=500,
+            )
+            extra = [q for q in dict.fromkeys(_sanitize_query(a.get("query_text") or "") for a in angles.get("queries") or []) if len(q.split()) >= 2]
+            queries = list(dict.fromkeys(queries + extra))[:5]
+        except Exception:
+            pass
     except Exception as exc:
         plan = QueryPlanner().plan(question)
         queries = [s["query_text"] for s in plan["subqueries"]][:2]
