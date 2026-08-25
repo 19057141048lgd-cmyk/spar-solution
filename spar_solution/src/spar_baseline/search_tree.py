@@ -564,6 +564,10 @@ class SearchTreeRunner:
 
             # -- 4. 判断：新增论文批量交给 understanding_layer.judge --
             to_judge = [paper for paper in pool if str(paper.get("paper_id")) not in judged_ids]
+            # 引用捞回的子论文（被正文点名）优先判分：它们的先验相关性高于
+            # 普通检索结果，LLM 预算紧张时必须先花在它们身上（hybrid-5 实测：
+            # 末层子论文没判到分，Gold 排位 27-33 卡在 recall@20 之外）。
+            to_judge.sort(key=lambda paper: (int((paper.get("provenance") or {}).get("citation_depth") or 0) < 1,))
             judgements: dict[str, Mapping[str, Any]] = {}
             if self.understanding_layer is not None and to_judge and self._llm_budget_left():
                 unique: dict[str, dict[str, Any]] = {}
