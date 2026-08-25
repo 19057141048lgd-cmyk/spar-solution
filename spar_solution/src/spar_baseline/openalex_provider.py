@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from time import perf_counter
+import threading
+from time import monotonic, perf_counter, sleep
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
@@ -171,6 +172,14 @@ def _default_transport(method: str, url: str, headers: Mapping[str, str], timeou
         raise ProviderError("openalex", "network", f"request failed: {type(exc).__name__}") from exc
 
 
+# 全局节流：所有 OpenAlexProvider 实例共享。phase-a/a1 两轮哨兵被
+# HTTP 429 限流污染（43/73 次调用被拒，池子被砍半，宏观指标不可比），
+# 根因是 4 线程并发 + 无间隔连发。礼貌池 + 最小间隔 + 429 退避重试。
+_OPENALEX_THROTTLE_LOCK = threading.Lock()
+_OPENALEX_LAST_CALL = 0.0
+OPENALEX_MIN_INTERVAL = 1.0  # 秒；测试可 monkeypatch
+
+
 class OpenAlexProvider:
     """Search OpenAlex works and convert records to PaperDoc v1 objects."""
 
@@ -202,6 +211,7 @@ class OpenAlexProvider:
             config, "api_key", "OPENALEX_API_KEY", "openalex_api_key"
         )
         self.api_key = str(self.api_key).strip() if self.api_key is not None else ""
+        self.mailto = str(_config_value(config, "OPENALEX_MAILTO", "openalex_mailto") or "").strip()
         self.timeout = float(timeout)
         if self.timeout <= 0:
             raise ProviderError(self.source, "config", "timeout must be positive")
@@ -214,30 +224,43 @@ class OpenAlexProvider:
         return cls(config, **kwargs)
 
     def _invoke_transport(self, url: str) -> TransportResponse:
+        global _OPENALEX_LAST_CALL
         headers = {"Accept": "application/json", "User-Agent": "spar-p1/openalex"}
         transport = self.transport
-        try:
-            if not callable(transport):
-                raise ProviderError(self.source, "config", "transport must be callable")
-            response = transport("GET", url, headers, self.timeout)
-            return _normalise_response(response)
-        except ProviderError:
-            raise
-        except HTTPError as exc:
-            code = "auth" if exc.code in {401, 403} else "rate" if exc.code == 429 else "network"
-            raise ProviderError(
-                self.source,
-                code,
-                f"HTTP status {exc.code}",
-                status_code=exc.code,
-                retryable=exc.code >= 500 or exc.code == 429,
-            ) from exc
-        except TimeoutError as exc:
-            raise ProviderError(self.source, "timeout", "request timed out") from exc
-        except (URLError, OSError) as exc:
-            raise ProviderError(self.source, "network", f"request failed: {type(exc).__name__}") from exc
-        except Exception as exc:
-            raise ProviderError(self.source, "network", f"transport failed: {type(exc).__name__}") from exc
+        if not callable(transport):
+            raise ProviderError(self.source, "config", "transport must be callable")
+        for attempt in range(3):
+            with _OPENALEX_THROTTLE_LOCK:
+                wait = OPENALEX_MIN_INTERVAL - (monotonic() - _OPENALEX_LAST_CALL)
+                if wait > 0:
+                    sleep(wait)
+                _OPENALEX_LAST_CALL = monotonic()
+                response = None
+                try:
+                    response = _normalise_response(transport("GET", url, headers, self.timeout))
+                except ProviderError:
+                    raise
+                except HTTPError as exc:
+                    code = "auth" if exc.code in {401, 403} else "rate" if exc.code == 429 else "network"
+                    raise ProviderError(
+                        self.source,
+                        code,
+                        f"HTTP status {exc.code}",
+                        status_code=exc.code,
+                        retryable=exc.code >= 500 or exc.code == 429,
+                    ) from exc
+                except TimeoutError as exc:
+                    raise ProviderError(self.source, "timeout", "request timed out") from exc
+                except (URLError, OSError) as exc:
+                    raise ProviderError(self.source, "network", f"request failed: {type(exc).__name__}") from exc
+                except Exception as exc:
+                    raise ProviderError(self.source, "network", f"transport failed: {type(exc).__name__}") from exc
+            if response is not None and response.status != 429:
+                return response
+            # 429 退避重试：限流窗口短，等待后重试比直接失败更划算。
+            if attempt < 2:
+                sleep(2.0 * (attempt + 1))
+        raise ProviderError(self.source, "rate", "HTTP status 429 after retries", status_code=429, retryable=True)
 
     def _request_json(self, url: str) -> tuple[Mapping[str, Any], float]:
         started = perf_counter()
@@ -267,6 +290,8 @@ class OpenAlexProvider:
 
     def _url(self, path: str, params: Mapping[str, Any] | None = None) -> str:
         values = dict(params or {})
+        if self.mailto:
+            values.setdefault("mailto", self.mailto)  # OpenAlex 礼貌池
         if self.api_key:
             values["api_key"] = self.api_key
         query = urlencode(values)
