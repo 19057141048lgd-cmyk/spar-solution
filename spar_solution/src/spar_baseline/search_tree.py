@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterable, Mapping
 from .deepseek_layer import DeepSeekCallError, DeepSeekSchemaError
 from .p2_citation import _child_id, _nested_paper, _relation_call, _relation_type
 from .p2_pipeline import _deduplicate, _group_by_source
+from .identity import normalize_title
 from .p2_recall import RecallRunner, SourceRouter
 from .p2_scoring import Scorer
 from .paperdoc import validate_paper_doc
@@ -88,6 +89,41 @@ def _relevance_of(paper: Mapping[str, Any]) -> float:
     return float(value)
 
 
+# 词法兜底分排序折扣：词法重叠对错领域论文常给虚高（长摘要覆盖全部查询
+# 词），排序时必须排在同分的 LLM 判断之后。扩展资格判断仍用原始词法分
+# （provenance.lexical_relevance），无 LLM 模式不被折扣饿死。
+LEXICAL_DISCOUNT = 0.7
+
+
+def _title_matches(candidate_title: str, pick_query: str, *, min_overlap: float = 0.7) -> bool:
+    """点名查回的模糊标题匹配：归一化相等，或词元重合率（短侧为分母）达标。
+
+    LLM 从参考文献清洗出的标题常多/少副标题词、卷期页码——完全相等过于
+    苛刻（hybrid-5 实测点名成功也查不回）。短侧为分母容忍清洗噪声：
+    "Title: Subtitle" vs "Title" 视为命中。
+    """
+
+    left = normalize_title(candidate_title)
+    right = normalize_title(pick_query)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_tokens, right_tokens = set(left.split()), set(right.split())
+    if not left_tokens or not right_tokens:
+        return False
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens)) >= min_overlap
+
+
+def _seed_relevance(paper: Mapping[str, Any]) -> float:
+    """扩展资格/停止判断用的相关分：词法兜底论文取折扣前原始分。"""
+
+    lexical = (paper.get("provenance") or {}).get("lexical_relevance")
+    if isinstance(lexical, (int, float)) and not isinstance(lexical, bool):
+        return float(lexical)
+    return _relevance_of(paper)
+
+
 def _plan_queries(plan: Mapping[str, Any] | None, limit: int) -> list[str]:
     """从 QueryPlan 提取去重后的检索式文本（保持原顺序）。"""
 
@@ -139,20 +175,21 @@ class SearchTreeRunner:
         understanding_layer: Any | None = None,
         *,
         max_depth: int = 2,
-        queries_per_level: int = 2,
-        docs_to_expand: int = 8,
+        queries_per_level: int = 4,
+        docs_to_expand: int = 16,
         relevance_threshold: float = 0.75,
         page_size: int = 10,
-        max_provider_calls: int = 30,
+        max_provider_calls: int = 40,
         max_llm_calls: int = 20,
         expand_mode: str = "openalex",
         fulltext_cache: "str | Path | None" = None,
+        max_judge_papers: int = 40,
     ) -> None:
         if expand_mode not in ("hybrid", "fulltext", "openalex"):
             raise ValueError("expand_mode must be hybrid, fulltext or openalex")
         if max_depth < 1 or queries_per_level < 1 or page_size < 1:
             raise ValueError("max_depth, queries_per_level and page_size must be positive")
-        if docs_to_expand < 0 or max_provider_calls < 0 or max_llm_calls < 0:
+        if docs_to_expand < 0 or max_provider_calls < 0 or max_llm_calls < 0 or max_judge_papers < 0:
             raise ValueError("docs_to_expand and call budgets must be non-negative")
         if not 0 <= relevance_threshold <= 1:
             raise ValueError("relevance_threshold must be between 0 and 1")
@@ -167,11 +204,19 @@ class SearchTreeRunner:
         self.max_llm_calls = int(max_llm_calls)
         self.expand_mode = expand_mode
         self.fulltext_cache = fulltext_cache
+        # 判分预算调度：token 红线（≤5 万/题）的硬约束。宽度放大后池子可达
+        # 130-180 篇，全量 LLM 判断实测 5-8 万 token/题超线（sentinel-p1-full）。
+        # 只判优先级最高的 max_judge_papers 篇（引用子优先，其次融合序），
+        # 其余退词法分（×0.7 折扣排序）——未判分者仍在 ranked_pool 里供
+        # recall@50/100，只是不消耗判分预算。
+        self.max_judge_papers = int(max_judge_papers)
         self.router = SourceRouter(providers)
         self.recall_runner = RecallRunner(self.router, page_size=self.page_size)
         self.planner = QueryPlanner()
         self.scorer = Scorer()
         self._llm_calls = 0
+        self._llm_judge_used = 0
+        self._judge_capped = 0
 
     # ------------------------------------------------------------------
     # LLM 计量与预算
@@ -373,14 +418,22 @@ class SearchTreeRunner:
             judged_ids.add(paper_id)
             judgement = judgements.get(paper_id)
             score: float
+            raw: float
             try:
                 score = float(judgement["relevance_score"]) if judgement is not None else float("nan")
             except (KeyError, TypeError, ValueError):
                 score = float("nan")
-            if score != score:  # 无判断或畸形判断 → 词法分兜底
-                score = float(self.scorer.preliminary_relevance(paper, scoring_plan))
+            provenance = paper.setdefault("provenance", {})
+            if score == score:  # LLM 判断生效
+                provenance["relevance_source"] = "llm"
+                raw = score
+            else:  # 无判断或畸形判断 → 词法分兜底（排序打折，资格用原始分）
+                raw = float(self.scorer.preliminary_relevance(paper, scoring_plan))
+                provenance["relevance_source"] = "lexical"
+                provenance["lexical_relevance"] = raw
+                score = round(raw * LEXICAL_DISCOUNT, 6)
             paper.setdefault("scores", {})["relevance"] = score
-            if score >= self.relevance_threshold:
+            if raw >= self.relevance_threshold:
                 new_relevant_ids.append(paper_id)
         return new_relevant_ids
 
@@ -407,7 +460,6 @@ class SearchTreeRunner:
 
         try:
             from .fulltext_flow import load_paper_fulltext, pick_references
-            from .identity import normalize_title
         except ImportError:
             return None, 0
         cache = self.fulltext_cache or Path(__file__).resolve().parents[1] / "artifacts" / "flow-cache"
@@ -438,7 +490,7 @@ class SearchTreeRunner:
                     result = self.router.providers[name].search(pick["query"], page_size=3)
                 except Exception:
                     continue
-                match = next((c for c in result.records[:2] if normalize_title(c.get("bibliography", {}).get("title") or "") == normalize_title(pick["query"])), None)
+                match = next((c for c in result.records[:5] if _title_matches(c.get("bibliography", {}).get("title") or "", pick["query"])), None)
                 if match is None:
                     continue
                 child = dict(match)
@@ -549,9 +601,9 @@ class SearchTreeRunner:
         for level in range(self.max_depth):
             # -- 1. 本层查询（第 0 层已在上方生成；深层查询由 top 论文派生）--
             if level:
-                relevant_pool = [paper for paper in pool if _relevance_of(paper) >= self.relevance_threshold]
+                relevant_pool = [paper for paper in pool if _seed_relevance(paper) >= self.relevance_threshold]
                 if relevant_pool:
-                    relevant_pool.sort(key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
+                    relevant_pool.sort(key=lambda paper: (-_seed_relevance(paper), str(paper.get("paper_id"))))
                     unused = [paper for paper in relevant_pool if str(paper.get("paper_id")) not in query_seed_ids]
                     top_papers = (unused or relevant_pool)[:2]
                     query_seed_ids.update(str(paper.get("paper_id")) for paper in top_papers)
@@ -612,8 +664,8 @@ class SearchTreeRunner:
             new_relevant_ids = self._judge_new_papers(pool, judged_ids, judge_plan, scoring_plan, errors, f"judge_L{level}")
 
             # -- 5. 引用扩展：高相关论文按分取前 docs_to_expand 篇 --
-            candidates = [paper for paper in pool if _relevance_of(paper) >= self.relevance_threshold and str(paper.get("paper_id")) not in expanded_ids]
-            candidates.sort(key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
+            candidates = [paper for paper in pool if _seed_relevance(paper) >= self.relevance_threshold and str(paper.get("paper_id")) not in expanded_ids]
+            candidates.sort(key=lambda paper: (-_seed_relevance(paper), str(paper.get("paper_id"))))
             if not candidates:
                 # 兜底种子：没有 >=0.75 的论文时，只要池子大体在题（最高分
                 # >=0.3）且有摘要，就取融合分 top-3 扩引用，避免引用链饿死；
@@ -621,11 +673,11 @@ class SearchTreeRunner:
                 best_effort = [
                     paper
                     for paper in pool
-                    if _relevance_of(paper) >= 0.3
+                    if _seed_relevance(paper) >= 0.3
                     and str((paper.get("bibliography") or {}).get("abstract") or "").strip()
                     and str(paper.get("paper_id")) not in expanded_ids
                 ]
-                best_effort.sort(key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
+                best_effort.sort(key=lambda paper: (-_seed_relevance(paper), str(paper.get("paper_id"))))
                 candidates = best_effort[:3]
             candidates = candidates[: self.docs_to_expand]
             citation_calls = 0
@@ -716,7 +768,7 @@ class SearchTreeRunner:
             if not (pool_ids - level_start_ids):
                 stop_reason = STOP_NO_NEW_PAPERS
                 break
-            if not any(_relevance_of(paper) >= self.relevance_threshold for paper in pool):
+            if not any(_seed_relevance(paper) >= self.relevance_threshold for paper in pool):
                 stop_reason = STOP_NO_RELEVANT_PAPERS
                 break
         else:

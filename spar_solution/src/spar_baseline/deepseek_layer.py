@@ -317,7 +317,9 @@ def _paper_summary(paper: Mapping[str, Any]) -> dict[str, Any]:
     validate_paper_doc(paper)
     bib = paper.get("bibliography") or {}
     identifiers = paper.get("identifiers") or {}
-    abstract = str(bib.get("abstract") or "")[:5000]
+    # 判断层只需标题+摘要前段锚定五档量规；5000 字符截断使 judge prompt
+    # 均值 ~5万 token/题压效率红线，2000 已覆盖量规判分所需信息。
+    abstract = str(bib.get("abstract") or "")[:2000]
     return {
         "paper_id": str(paper["paper_id"]),
         "identifiers": {key: identifiers.get(key) for key in ("doi", "arxiv_id", "openalex_id", "s2_id", "unique_id") if identifiers.get(key)},

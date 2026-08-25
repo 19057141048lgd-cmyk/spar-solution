@@ -85,13 +85,25 @@ def _strip_tags(fragment: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def fetch_arxiv_html_markdown(arxiv_id: str) -> str | None:
-    """拉取 arXiv 原生 HTML（或 ar5iv 镜像）并转成带编号引用的纯文本。"""
+def fetch_arxiv_html_markdown(arxiv_id: str, *, cache_dir: str | Path | None = None) -> str | None:
+    """拉取 arXiv 原生 HTML（或 ar5iv 镜像）并转成带编号引用的纯文本。
+
+    cache_dir 提供时先读盘缓存（html/<id>.txt），命中不再联网——正文获取
+    是 hybrid 模式的时延大头（实测单题 2.5-6 分钟超红线的主要原因）。
+    """
 
     normalized = re.sub(r"^(arxiv:)?", "", str(arxiv_id or "").strip(), flags=re.IGNORECASE)
     normalized = re.sub(r"v\d+$", "", normalized)
     if not re.fullmatch(r"\d{4}\.\d{4,5}(\.\d+)?|[a-z-]+/\d{7}", normalized):
         return None
+    cache_path = None
+    if cache_dir is not None:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", normalized)
+        cache_path = Path(cache_dir) / "html" / f"{safe}.txt"
+        if cache_path.is_file():
+            cached = cache_path.read_text(encoding="utf-8", errors="ignore")
+            if cached.strip():
+                return cached
     for template in (ARXIV_HTML_URL, AR5IV_HTML_URL):
         try:
             html = _get(template.format(arxiv_id=normalized)).decode("utf-8", errors="ignore")
@@ -100,7 +112,11 @@ def fetch_arxiv_html_markdown(arxiv_id: str) -> str | None:
         if "References" not in html and "references" not in html:
             continue
         # 保留正文中的 [n] 引用标记：arXiv HTML 的 <a ...>[n]</a> 去标签后自然留下 [n]。
-        return _strip_tags(html)
+        text = _strip_tags(html)
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(text, encoding="utf-8")
+        return text
     return None
 
 
@@ -180,7 +196,7 @@ def load_paper_fulltext(paper: Mapping[str, Any], *, cache_dir: str | Path | Non
     arxiv_id = (paper.get("identifiers") or {}).get("arxiv_id")
     best: PaperFulltext | None = None
     if arxiv_id:
-        html_text = fetch_arxiv_html_markdown(arxiv_id)
+        html_text = fetch_arxiv_html_markdown(arxiv_id, cache_dir=cache_dir)
         if html_text:
             references, sections, contexts, refs_text = parse_references_and_sections(html_text)
             best = PaperFulltext(paper_id, "arxiv_html", sections, references, contexts, refs_text)

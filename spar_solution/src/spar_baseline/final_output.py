@@ -19,8 +19,12 @@ FINAL_SCHEMA = "spar.final.v2"
 LEGACY_SCHEMA = "spar.final.v1"
 COMPONENTS = ("relevance", "constraint", "evidence", "quality", "citation", "novelty")
 ZONES = {"high", "partial", "reserve"}
-DEFAULT_SELECT_THRESHOLD = 0.55
-DEFAULT_MAX_SELECTED = 30
+# 阈值按分数基准区分：搜索树 relevance 是 LLM 五档量规分（0.9+ 常见），
+# P2 final 是六分量加权分（现实上限 ~0.6）。同一阈值会清空另一种基准的
+# 提交集合。0.9/8 来自 50 题存档池离线扫描（selected_f1 0.081→0.174）。
+DEFAULT_THRESHOLD_BY_BASIS = {"final": 0.55, "relevance": 0.9}
+DEFAULT_SELECT_THRESHOLD = 0.9
+DEFAULT_MAX_SELECTED = 8
 DEFAULT_POOL_K = 50
 
 
@@ -68,17 +72,19 @@ def build_final_selection(
     run: Mapping[str, Any] | Any,
     *,
     top_k: int | None = None,
-    select_threshold: float = DEFAULT_SELECT_THRESHOLD,
+    select_threshold: float | None = None,
     max_selected: int = DEFAULT_MAX_SELECTED,
     pool_k: int = DEFAULT_POOL_K,
 ) -> dict[str, Any]:
     """返回 ``spar.final.v2`` 交付物。
 
-    默认按阈值选集合（官方口径）；传入 ``top_k`` 时退回旧 top-K 模式
-    （兼容历史调用），``selection_rule.mode`` 会如实记录。
+    默认按阈值选集合（官方口径）；``select_threshold=None`` 时按分数基准
+    自动取默认（final→0.55，relevance→0.9，见 DEFAULT_THRESHOLD_BY_BASIS）。
+    传入 ``top_k`` 时退回旧 top-K 模式（兼容历史调用），``selection_rule.mode``
+    会如实记录。
     """
 
-    if not 0 <= select_threshold <= 1:
+    if select_threshold is not None and not 0 <= select_threshold <= 1:
         raise ValueError("select_threshold must be between 0 and 1")
     if max_selected < 1 or pool_k < 1:
         raise ValueError("max_selected and pool_k must be positive")
@@ -91,13 +97,16 @@ def build_final_selection(
         if paper.get("status", {}).get("hard_constraints_pass") is not False
         and _score_of(paper) is not None
     ]
+    basis = "final" if any(isinstance((paper.get("scores") or {}).get("final"), (int, float)) and not isinstance((paper.get("scores") or {}).get("final"), bool) for paper in eligible) else "relevance"
+    if select_threshold is None:
+        select_threshold = DEFAULT_THRESHOLD_BY_BASIS[basis]
     eligible.sort(key=lambda item: (_score_of(item) or 0.0, str(item.get("paper_id") or "")), reverse=True)
     if top_k is not None:
         selected = eligible[:top_k]
         rule = {"mode": "legacy_top_k", "top_k": top_k, "basis": "final_or_relevance"}
     else:
         selected = [paper for paper in eligible if (_score_of(paper) or 0.0) >= select_threshold][:max_selected]
-        rule = {"mode": "threshold", "select_threshold": select_threshold, "max_selected": max_selected, "basis": "final_or_relevance"}
+        rule = {"mode": "threshold", "select_threshold": select_threshold, "max_selected": max_selected, "basis": basis}
 
     verdicts = {
         str(item.get("paper_id")): item
@@ -239,4 +248,4 @@ def validate_final_selection(value: Mapping[str, Any]) -> dict[str, Any]:
     return deepcopy(dict(value))
 
 
-__all__ = ["DEFAULT_MAX_SELECTED", "DEFAULT_POOL_K", "DEFAULT_SELECT_THRESHOLD", "FINAL_SCHEMA", "LEGACY_SCHEMA", "build_final_selection", "validate_final_selection"]
+__all__ = ["DEFAULT_MAX_SELECTED", "DEFAULT_POOL_K", "DEFAULT_SELECT_THRESHOLD", "DEFAULT_THRESHOLD_BY_BASIS", "FINAL_SCHEMA", "LEGACY_SCHEMA", "build_final_selection", "validate_final_selection"]

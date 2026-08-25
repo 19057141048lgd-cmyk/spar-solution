@@ -104,14 +104,15 @@ P/R/F1。`p2_metrics.py` 的 F1@10 是更严的参考口径。
 ## 6. 任务清单（按序执行，做完一项验收一项）
 
 ### P0（先做，都不需要大规模联网）
-- [ ] **P0-1 末层补判分**：`search_tree.py` 的判断只发生在层级循环开头
-      （约 :566），末层入池的子论文（约 :626）永远错过。修法：循环结束后
-      对池内 `relevance is None` 的论文补一轮判分（LLM 预算内优先，退词法）。
-      附单测：fixture 构造两层，断言出池论文无 relevance=None。
-      预期：recall@20 0.298→0.328。**哨兵 5 题验证（见第 7 节）。**
-- [ ] **P0-2 token 落盘**：tree 路径把 LLM client 的 usage（client.usage
-      属性已有累计器）写进 stats 与 summary（`autoscholar_pipeline_eval.py:91`
-      一带）。附单测。
+- [x] **P0-1 末层补判分**（c2fe8d4）：判分块提取为 `_judge_new_papers`，
+      循环后补判一轮（LLM 预算内、引用子优先、退词法）。单测 2 项：出池
+      论文无 relevance=None（LLM 路径 + 纯词法路径）。哨兵第 1 轮
+      （sentinel-p0-fix）：test_20 r20 0.20→0.40（池内 Gold 排上位），
+      test_3 无回退，全 5 题 none_rel=0；test_4/8 的 Gold 本次未进池
+      （扩展种子 3 vs 基线 5，单次方差，见第 7 节第二遍预案）。
+- [x] **P0-2 token 落盘**（c2fe8d4）：stats 新增 llm_prompt/completion/
+      total_tokens、llm_failures；评测 CLI 同题透传。实测暴露真相：
+      旧宽度下均 5.2 万 token/题已压 50k 红线（此前估计 2.5 万是错的）。
 
 ### P1（P0 验收后）
 - [ ] **P1-1 交卷集合收窄**：官方 K 未知前默认交 top-10（同 15 个 tp、
@@ -133,9 +134,9 @@ P/R/F1。`p2_metrics.py` 的 F1@10 是更严的参考口径。
 
 ## 7. 5 题哨兵制度（唯一合法的联网验证方式）
 
-- **固定哨兵集，不随机**。建议构成（qid 待用户/老师最终圈定，未定前可用
-  此候选）：零召回型 2 题 + 满分型 1 题（如 test_3）+ 排序失败型 1 题
-  （test_4，专盯 P0-1）+ 部分分型 1 题。
+- **固定哨兵集，不随机**。已定（scripts_sentinel_5.py 硬编码）：
+  test_4、test_8（排序失败×2，盯 P0-1）、test_0（零召回+错领域，防伤召回）、
+  test_3（最高分段 0.60，防回退）、test_20（部分分+排序敏感，判分校准探针）。
 - 每轮验证流程：改代码 → 全量单测 → 哨兵 5 题（跑前报成本）→ 与
   `artifacts/autoscholar/tree-n50-v2*/<qid>/papers.json` 同题配对 →
   出胜负表（哪些题变好/变坏/不变）→ 提交 + 简报。

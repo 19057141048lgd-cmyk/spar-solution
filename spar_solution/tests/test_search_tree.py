@@ -178,12 +178,14 @@ class SearchTreeRunnerTests(unittest.TestCase):
         self.assertEqual(result["stats"]["planner_source"], "rules")
         self.assertEqual(result["stats"]["llm_calls"], 0)
         self.assertEqual(result["nodes"][0]["queries"], ["wifi csi heart rate monitoring"])
-        # 深层查询退到 next_iteration 的 gap 模板。
-        self.assertEqual(len(result["nodes"][1]["queries"]), 2)
+        # 深层查询退到 next_iteration 的 gap 模板（宽度 4 条/层）。
+        self.assertEqual(len(result["nodes"][1]["queries"]), 4)
         self.assertTrue(all(query.startswith("wifi csi heart rate monitoring") for query in result["nodes"][1]["queries"]))
-        # 无 LLM 时子论文用词法分（查询词全覆盖 → 1.0）。
+        # 无 LLM 时子论文用词法分：原始 1.0，排序分打 0.7 折；来源可审计。
         papers = {paper["paper_id"]: paper for paper in result["papers"]}
-        self.assertAlmostEqual(papers[child["paper_id"]]["scores"]["relevance"], 1.0)
+        self.assertAlmostEqual(papers[child["paper_id"]]["scores"]["relevance"], 0.7)
+        self.assertEqual(papers[child["paper_id"]]["provenance"]["relevance_source"], "lexical")
+        self.assertAlmostEqual(papers[child["paper_id"]]["provenance"]["lexical_relevance"], 1.0)
         self.assertEqual(result["stop_reason"], "no_new_papers")
         self.assertEqual(len(result["edges"]), 1)
 
@@ -285,8 +287,9 @@ class SearchTreeRunnerTests(unittest.TestCase):
         self.assertEqual(result["stats"]["llm_calls"], 1)
         self.assertEqual(result["stats"]["planner_source"], "llm")
         papers = {paper["paper_id"]: paper for paper in result["papers"]}
-        self.assertAlmostEqual(papers[seed["paper_id"]]["scores"]["relevance"], 1.0)
-        self.assertEqual(len(result["nodes"][1]["queries"]), 2)
+        self.assertAlmostEqual(papers[seed["paper_id"]]["scores"]["relevance"], 0.7)
+        self.assertEqual(papers[seed["paper_id"]]["provenance"]["relevance_source"], "lexical")
+        self.assertEqual(len(result["nodes"][1]["queries"]), 4)
         self.assertTrue(all(query.startswith("wifi csi heart rate monitoring") for query in result["nodes"][1]["queries"]))
         self.assertEqual(result["stop_reason"], "no_new_papers")
 

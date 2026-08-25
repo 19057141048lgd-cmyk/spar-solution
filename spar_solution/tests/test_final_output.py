@@ -70,10 +70,15 @@ class FinalOutputV2Tests(unittest.TestCase):
         self.assertEqual(len(result["ranked_pool"]), 10)
 
     def test_tree_style_papers_use_relevance_basis(self):
-        papers = [_tree_paper("t1", 0.8), _tree_paper("t2", 0.4)]
+        # relevance 基准的自动阈值是 0.9（DEFAULT_THRESHOLD_BY_BASIS）：
+        # 0.95 入选提交集合，0.8 只进 Recall@K 排序池。
+        papers = [_tree_paper("t1", 0.95), _tree_paper("t2", 0.8)]
         result = build_final_selection({"query": "q", "query_plan": {"query_id": "qid"}, "papers": papers, "citations": [], "manifest": {"cost": {}}})
+        self.assertEqual(result["selection_rule"]["basis"], "relevance")
+        self.assertEqual(result["selection_rule"]["select_threshold"], 0.9)
         self.assertEqual([item["paper_id"] for item in result["results"]], ["t1"])
-        self.assertEqual(result["ranked_pool"][0]["score"], 0.8)
+        self.assertEqual(result["ranked_pool"][0]["score"], 0.95)
+        self.assertEqual(result["ranked_pool"][1]["paper_id"], "t2")
 
     def test_unscored_papers_stay_in_ranked_pool(self):
         # 末层引用捞回、未判分的论文不能从 Recall@K 排序池消失。
