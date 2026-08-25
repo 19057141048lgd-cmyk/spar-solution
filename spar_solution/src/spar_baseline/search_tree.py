@@ -526,7 +526,7 @@ class SearchTreeRunner:
             from .fulltext_flow import load_paper_fulltext, pick_references
         except ImportError:
             return None, 0
-        cache = self.fulltext_cache or Path(__file__).resolve().parents[1] / "artifacts" / "flow-cache"
+        cache = self.fulltext_cache or Path(__file__).resolve().parents[2] / "artifacts" / "flow-cache"
         try:
             fulltext = load_paper_fulltext(seed, cache_dir=cache)
         except Exception as exc:

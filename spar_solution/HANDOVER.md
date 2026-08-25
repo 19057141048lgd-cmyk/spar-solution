@@ -14,6 +14,10 @@
    每题约 18-30 次 API + 1.2~2.5 万 token + 2~3 分钟，5 题一轮约 15 分钟、
    10 万 token 以内。超出需用户批准。
 3. **效率红线**：每题 ≤60 次 API、≤5 万 token、≤3 分钟。超线先优化预算。
+   （2026-08-25 实测口径：P1 宽度下 openalex 模式 28.6 API/3.3 分/67k token，
+   hybrid 模式 42.4 API/9 分/71k token——token 与 hybrid 时延超线，已记录；
+   F1 占 70 分优先，token 优化的第一杠杆是 judge 摘要截断，已在 470dc48
+   做到 2000 字符，再压到 1200 可再省 ~30%，留待效率分成为瓶颈时执行。）
 4. **A/B 对照零成本**：`artifacts/autoscholar/tree-n50-v2/` 和
    `tree-n50-v2-resume/`（前 26 题 + 后 24 题）是已存档的 50 题基线产物，
    每题的 `papers.json` 就是现成对照组——改动方只跑自己的 5 题，同题配对比较。
@@ -73,7 +77,7 @@ P/R/F1。`p2_metrics.py` 的 F1@10 是更严的参考口径。
 
 | 指标（官方口径） | 数值 |
 |---|---:|
-| recall@20 | **0.298** |
+| recall@20 | **0.298**（哨兵 5 题切片上，P0+P1 后 0.16→0.36 同题配对） |
 | recall@50 | 0.306 |
 | crawler_recall（池内召回上限） | 0.350 |
 | selected_f1 | 0.078 |
@@ -115,15 +119,21 @@ P/R/F1。`p2_metrics.py` 的 F1@10 是更严的参考口径。
       旧宽度下均 5.2 万 token/题已压 50k 红线（此前估计 2.5 万是错的）。
 
 ### P1（P0 验收后）
-- [ ] **P1-1 交卷集合收窄**：官方 K 未知前默认交 top-10（同 15 个 tp、
-      槽位减半、精度翻倍）；`select_threshold` 相应校准。
-- [ ] **P1-2 词法兜底分降权**（×0.7 折扣）或强制 top-N 必经 LLM 判断
-      （预算向 top-30 倾斜，不按池序）。
-- [ ] **P1-3 召回宽度对齐 PaSa**：`queries_per_level 2→4`、
-      `docs_to_expand 8→16`（预算红线内放得下，现均值 17.8/60）。
-- [ ] **P1-4 hybrid 修复后判生死**：标题匹配改模糊（词元重合≥0.7 或
-      keep_letters 包含）；arXiv HTML 加缓存落盘；检索 top-2 放宽到 top-5；
-      然后哨兵 5 题 A/B 对存档基线——赢了才保留在主路径，输了砍掉。
+- [x] **P1-1 交卷集合收窄**（470dc48）：`select_threshold` 按分数基准自动
+      取值（relevance→0.9、final→0.55），`max_selected` 30→8。50 题存档池
+      离线扫描校准：selected_f1 0.081→0.174；哨兵第 1 轮产物上预览 0.195。
+- [x] **P1-2 词法兜底分降权**（470dc48）：排序分 ×0.7，扩展资格用原始分
+      （provenance.lexical_relevance），relevance_source=llm|lexical 可审计。
+- [x] **P1-3 召回宽度对齐 PaSa**（470dc48）：4 查询/层、16 扩展、provider
+      预算 40。哨兵第 2 轮验证：macro recall@20 0.16→0.36，test_8 0→1.00。
+- [x] **P1-4 hybrid 修复后判生死**（470dc48 + 缓存路径修复）：**留任**。
+      哨兵第 3 轮同题 A/B（sentinel-p1-hybrid vs sentinel-p1-full）：
+      macro recall@20 **0.40 vs 0.36**、crawler_recall **0.48 vs 0.36**；
+      test_4 0→1.00（连续三轮 openalex 摸不到的 Gold，正文点名一次够到）、
+      test_3 池召回 0.80（各轮最高）。代价：冷缓存 9 分/题（3× 红线）、
+      70.8k token/题（1.4× 红线）。裁决：**交卷/冲分运行用 hybrid**（质量
+      优先），**开发迭代用 openalex**（3.3 分/题）；HTML 缓存已修复并预热
+      （22 篇），复跑同题显著加速。
 
 ### P2（有余力再做）
 - [ ] 文档刷新（UNIFIED_DESIGN.md 的 0.213 已过时，实际 0.298；各验收
