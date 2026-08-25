@@ -38,13 +38,20 @@ _QUESTION_SHELL_RE = re.compile(
 )
 
 # 领域消歧系统提示（命中率优先：宁可多搜几个领域的门，也不能照字面进错街区）。
+# v2（2026-08-25 test_0 实测复盘）：v1 只给常规领域解读（3D 重建/压缩感知/
+# 生成模型），漏掉了"reconstruction-based"作为方法族名称的领域——异常检测
+# 综述里就是这么分类方法的。v2 要求显式考虑方法族命名 + 综述定位查询。
 _DISAMBIGUATE_SYSTEM_PROMPT = (
     "You are an academic search strategist. The question's wording often does not match the "
     "terminology of the research field it came from: words like 'reconstruction', 'hybrid', "
-    "'calibration', 'alignment' mean different things in different fields. First infer 2-4 "
-    "DISTINCT research fields the question could belong to, then write ONE short keyword-style "
-    "query per field using that field's own terminology (what its papers would say). "
-    "Return JSON only: {\"fields\": [{\"field\": \"...\", \"query\": \"...\"}]}. "
+    "'calibration', 'alignment' mean different things in different fields. "
+    "Infer 3-6 DISTINCT readings of the question. Two kinds count: (a) different research "
+    "fields it could belong to; (b) METHOD-FAMILY readings — phrases like 'reconstruction-based', "
+    "'contrastive', 'generative', 'self-supervised' are family names used inside specific fields' "
+    "survey taxonomies (ask yourself: which field's surveys classify methods under this exact "
+    "family name?). For each reading write ONE short keyword query in that field's own terminology. "
+    "If a reading has a well-known survey covering it, include one survey-finding query "
+    "(e.g. '... survey'). Return JSON only: {\"fields\": [{\"field\": \"...\", \"query\": \"...\"}]}. "
     "Never invent paper facts."
 )
 
@@ -293,12 +300,12 @@ class SearchTreeRunner:
         output: list[str] = []
         values = payload.get("fields")
         if isinstance(values, list):
-            for item in values[:4]:
+            for item in values[:6]:
                 if isinstance(item, Mapping):
                     text = str(item.get("query") or "").strip()
                     if text:
                         output.append(text)
-        return output[:4]
+        return output[:6]
 
     def _rephrase_queries(
         self,
