@@ -110,7 +110,9 @@ class OpenAlexProviderTests(unittest.TestCase):
         params = parse_qs(parsed.query)
         self.assertEqual(params["search"], ["WiFi heart rate monitoring"])
         self.assertEqual(params["per_page"], ["5"])
-        self.assertEqual(params["api_key"], [self.api_key])
+        # api_key 不再随 URL 发送（key 额度耗尽事故，2026-08-26）；礼貌池
+        # mailto 未配置时不携带任何鉴权参数。
+        self.assertNotIn("api_key", params)
 
         paper = papers[0]
         self.assertIs(validate_paper_doc(paper), paper)

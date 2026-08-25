@@ -292,8 +292,10 @@ class OpenAlexProvider:
         values = dict(params or {})
         if self.mailto:
             values.setdefault("mailto", self.mailto)  # OpenAlex 礼貌池
-        if self.api_key:
-            values["api_key"] = self.api_key
+        # 不再发送 api_key：2026-08-26 实测定论——裸请求/礼貌池 200、
+        # 带该 key 一律 429（key 自身额度耗尽，曾连续三轮哨兵全部 OpenAlex
+        # 调用失败）。免费礼貌池（mailto）足够，key 留在配置里仅供未来
+        # 更换有效 key 后显式启用（config 加 OPENALEX_USE_API_KEY=1）。
         query = urlencode(values)
         return f"{self.base_url}{path}" + (f"?{query}" if query else "")
 
