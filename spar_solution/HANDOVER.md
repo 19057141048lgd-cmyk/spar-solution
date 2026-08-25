@@ -230,6 +230,30 @@ max_llm_calls（20→32）并把续搜调用移到 L1 深挖查询之前；②te
 0.8 档拥挤需更强的手段：对 top-30 做一次 LLM 列表式重排（比较式打分），
 prompt 微调已被证明不够。
 
+## 8.8 预算饿死连环修复与 0.44 新水位（2026-08-26 凌晨，side 会话）
+
+哨兵三轮（sentinel-calib-validation 0.32 → sentinel-budgetfix **0.44** →
+sentinel-cap60 **0.44** 站稳）。两个连环饿死 bug 修复：
+
+1. **LLM 预算饿死**（66ed03a）：判分放开后 test_0 单题判 254 篇把
+   max_llm_calls=20 吃光，L1 消歧续搜退 gap 模板。修复：20→50。
+2. **provider 预算饿死**（1c24831）：hybrid 点名在 L0 烧 44/61 次调用
+   超 40/60 上限，L1 整层 BUDGET_EXHAUSTED（test_0/test_8 三轮
+   levels=1）。修复：40→60；**仍不够**——cap60 轮 provider=61 再次
+   只跑一层。
+
+**下一会话第一刀**：给 L1 留预算（L0 扩展最多用 provider 预算的 60%，
+或每种子点名查回上限 2 次搜索）。修完 test_0/8 才第一次有机会跑到
+消歧续搜。
+
+**水位与稳定性**：macro r20 0.16（基线）→ 0.44（两轮稳定）；test_4
+五连满分；test_3 0.80 两轮；test_20 0.40 两轮。**test_0 若破零须先过
+循环验证关**：uncovered-readings 提示词内置了 test_0 的答案当例子
+（reconstruction-based→异常检测），须换哨兵外零分题验证明。
+test_8 的 Gold（2014-2015 老论文）四轮 hybrid 全零池，而 openalex 轮
+曾 crawl=1.0——hybrid 点名挤掉了 OpenAlex 走查对老论文的召回，
+修 L1 预算时一并观察。
+
 ## 9. 立即行动清单（新人第一天）
 
 1. `git clone` 仓库 + 配 `.env.local`（向用户要三个密钥）；
