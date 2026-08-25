@@ -402,10 +402,16 @@ class SearchTreeRunner:
 
         to_judge = [paper for paper in pool if str(paper.get("paper_id")) not in judged_ids]
         to_judge.sort(key=lambda paper: (int((paper.get("provenance") or {}).get("citation_depth") or 0) < 1,))
+        # 判分预算调度：本轮只把预算内的高优先级候选送 LLM，其余直接词法
+        # 兜底。judged_ids 对两者都记账——被预算挤掉的论文不再重试。
+        budget_left = max(0, self.max_judge_papers - self._llm_judge_used)
+        llm_candidates = to_judge[:budget_left]
+        self._llm_judge_used += len(llm_candidates)
+        self._judge_capped += len(to_judge) - len(llm_candidates)
         judgements: dict[str, Mapping[str, Any]] = {}
-        if self.understanding_layer is not None and to_judge and self._llm_budget_left():
+        if self.understanding_layer is not None and llm_candidates and self._llm_budget_left():
             unique: dict[str, dict[str, Any]] = {}
-            for paper in to_judge:
+            for paper in llm_candidates:
                 unique.setdefault(str(paper["paper_id"]), paper)
             try:
                 results = self._call_llm(lambda: self.understanding_layer.judge(judge_plan, list(unique.values())))
@@ -538,6 +544,8 @@ class SearchTreeRunner:
             raise ValueError("query must be a non-empty string")
         wall_started = perf_counter()
         self._llm_calls = 0
+        self._llm_judge_used = 0
+        self._judge_capped = 0
         self._relations_unsupported: set[str] = set()
         errors: list[dict[str, Any]] = []
         nodes: list[dict[str, Any]] = []
@@ -787,6 +795,8 @@ class SearchTreeRunner:
             "search_calls": search_calls,
             "relation_calls": relation_calls,
             "llm_calls": self._llm_calls,
+            "llm_judge_papers": self._llm_judge_used,
+            "judge_capped": self._judge_capped,
             "llm_failures": int(usage.get("failures", 0) or 0),
             "llm_prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
             "llm_completion_tokens": int(usage.get("completion_tokens", 0) or 0),

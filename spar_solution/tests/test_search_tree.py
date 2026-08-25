@@ -436,3 +436,49 @@ class LlmTokenStatsTests(unittest.TestCase):
         self.assertEqual(stats["llm_completion_tokens"], 300)
         self.assertEqual(stats["llm_total_tokens"], 1500)
         self.assertEqual(stats["llm_failures"], 1)
+
+
+class JudgeBudgetCapTests(unittest.TestCase):
+    """判分预算调度：max_judge_papers 内的候选走 LLM，其余退词法折扣分。"""
+
+    def test_judge_budget_caps_llm_candidates(self):
+        seed = _seed()
+        children = [
+            _fixture_paper(
+                f"fixture:child{i}",
+                f"10.1234/cap.child{i}",
+                f"WiFi CSI heart rate measurement {i}",
+                f"Reference paper {i} on WiFi CSI heart rate monitoring measurement and vital sign estimation.",
+            )
+            for i in range(5)
+        ]
+        for child in children:
+            child["relation_type"] = "references"
+        provider = FixtureProvider("arxiv", [seed], {seed["paper_id"]: children})
+        transport = FakeTaskTransport(plan_queries=["wifi csi heart rate monitoring"], generated_queries=[])
+        result = SearchTreeRunner(
+            {"arxiv": provider}, _scripted_layer(transport), max_depth=1, max_judge_papers=3
+        ).run(QUERY)
+        sources = [paper.get("provenance", {}).get("relevance_source") for paper in result["papers"]]
+        # L0 判 seed 1 篇 + 末轮补判预算剩 2 篇 → 恰好 3 篇 LLM，其余词法。
+        self.assertEqual(sources.count("llm"), 3)
+        self.assertEqual(sources.count("lexical"), 3)
+        self.assertTrue(all(source in {"llm", "lexical"} for source in sources))
+        stats = result["stats"]
+        self.assertEqual(stats["llm_judge_papers"], 3)
+        self.assertEqual(stats["judge_capped"], 3)
+        # 被预算挤掉的论文仍出池、仍带分，不出现 relevance=None。
+        self.assertTrue(all(paper["scores"].get("relevance") is not None for paper in result["papers"]))
+
+    def test_zero_judge_budget_is_all_lexical(self):
+        seed = _seed()
+        provider = FixtureProvider("arxiv", [seed], {})
+        transport = FakeTaskTransport(plan_queries=["wifi csi heart rate monitoring"], generated_queries=[])
+        result = SearchTreeRunner(
+            {"arxiv": provider}, _scripted_layer(transport), max_depth=1, max_judge_papers=0
+        ).run(QUERY)
+        sources = [paper.get("provenance", {}).get("relevance_source") for paper in result["papers"]]
+        self.assertEqual(sources, ["lexical"])
+        self.assertEqual(result["stats"]["llm_judge_papers"], 0)
+        # 判分预算为 0 不影响规划调用；judge_candidates 不应出现。
+        self.assertNotIn("judge_candidates", transport.calls)
