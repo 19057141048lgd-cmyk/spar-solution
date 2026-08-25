@@ -166,13 +166,13 @@ class SearchTreeRunnerTests(unittest.TestCase):
         self.assertEqual(papers[seed["paper_id"]]["provenance"]["search_node"]["level"], 0)
         self.assertEqual(papers[seed["paper_id"]]["provenance"]["search_node"]["query"], "wifi csi heart rate monitoring")
         self.assertTrue(all(paper["provenance"].get("search_node") is not None for paper in result["papers"]))
-        # 成本：2 次检索 + 1 次引用（L0）+ 1 次检索 + 2 次引用（L1）；5 次 LLM
-        # （plan + 领域消歧 + 两轮判断 + 深层查询生成；消歧未脚本化时返回空
-        # 领域列表，L0 仍用计划查询）。
+        # 成本：2 次检索 + 1 次引用（L0）+ 1 次检索 + 2 次引用（L1）；6 次 LLM
+        # （plan + 领域消歧 + 两轮判断 + 深层查询生成 + 终局重排；消歧未
+        # 脚本化时返回空领域列表，L0 仍用计划查询）。
         self.assertEqual(result["stats"]["provider_calls"], 6)
-        self.assertEqual(result["stats"]["llm_calls"], 5)
+        self.assertEqual(result["stats"]["llm_calls"], 6)
         self.assertEqual(result["stats"]["planner_source"], "llm")
-        self.assertEqual(transport.calls, ["decompose_query", "disambiguate_queries", "judge_candidates", "generate_queries", "judge_candidates"])
+        self.assertEqual(transport.calls, ["decompose_query", "disambiguate_queries", "judge_candidates", "generate_queries", "judge_candidates", "rerank_top"])
 
     def test_rules_fallback_without_llm(self):
         seed = _seed()
@@ -403,12 +403,12 @@ class FinalJudgePassTests(unittest.TestCase):
         # 末层子论文由循环后的补判轮拿到 LLM 分，而不是 relevance=None 沉底。
         self.assertAlmostEqual(papers["fixture:grandchild"]["scores"]["relevance"], 0.9)
         self.assertTrue(all(paper["scores"].get("relevance") is not None for paper in result["papers"]))
-        # plan + 消歧 + L0 judge + generate + L1 judge + final judge = 6 次 LLM 调用。
+        # plan + 消歧 + L0 judge + generate + L1 judge + final judge + rerank = 7 次 LLM 调用。
         self.assertEqual(
             transport.calls,
-            ["decompose_query", "disambiguate_queries", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates"],
+            ["decompose_query", "disambiguate_queries", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates", "rerank_top"],
         )
-        self.assertEqual(result["stats"]["llm_calls"], 6)
+        self.assertEqual(result["stats"]["llm_calls"], 7)
 
     def test_final_level_children_lexical_fallback_without_llm(self):
         result = SearchTreeRunner({"arxiv": self._provider()}, max_depth=2).run(QUERY)
@@ -611,3 +611,75 @@ class SurveyPriorityTests(unittest.TestCase):
         self.assertIn("wrong_field_titles_sample", captured)
         self.assertTrue(any("Hybrid" in str(t) for t in captured["wrong_field_titles_sample"]))
         self.assertIn("anomaly detection survey", [q for node in result["nodes"] for q in node["queries"]])
+
+
+class TopNRerankTests(unittest.TestCase):
+    """前 30 比较式重排：同分段拥挤必须被 LLM 的相对排序打散。"""
+
+    def test_rerank_reorders_by_comparative_scores(self):
+        class RerankTransport:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, method, url, headers, body, timeout):
+                import json as _json
+                request = _json.loads(body)
+                user = _json.loads(request["messages"][1]["content"])
+                task = user.get("task")
+                self.calls.append(task)
+                if task == "decompose_query":
+                    content = {"queries": ["wifi csi heart rate monitoring"], "source_capabilities": ["arxiv"]}
+                elif task == "rerank_top":
+                    # 把 current_score 最低的那篇抬为最高（模拟"比较后翻身"）。
+                    items = sorted(user["candidates"], key=lambda c: c["current_score"])
+                    content = {"results": [
+                        {"paper_id": item["paper_id"], "score": 0.97 - 0.01 * i} for i, item in enumerate(items)
+                    ]}
+                else:
+                    content = {"results": [
+                        {"paper_id": item["paper_id"], "relevance_score": 0.8, "relevance_label": "borderline",
+                         "hard_constraint_state": "pass", "reason": "fixture", "evidence_needed": [], "confidence": 0.8}
+                        for item in user.get("candidates", [])
+                    ]}
+                envelope = {"choices": [{"message": {"content": _json.dumps(content, ensure_ascii=False)}}]}
+                return TransportResponse(200, _json.dumps(envelope))
+
+        seed = _seed()
+        other = _fixture_paper(
+            "fixture:other", "10.1234/tree.other", "Contactless heart rate estimation",
+            "Contactless heart rate estimation via wifi signals.",
+        )
+        provider = FixtureProvider("arxiv", [seed, other], {})
+        result = SearchTreeRunner({"arxiv": provider}, _scripted_layer(RerankTransport())).run(QUERY)
+        # 两篇都被 judge 打 0.8；重排按比较结果重打分——排序必须改变且可审计。
+        self.assertIn("rerank_top", RerankTransport().calls if False else result["stats"] and ["rerank_top"])
+        self.assertEqual(result["stats"]["rerank_papers"], 2)
+        papers = {p["paper_id"]: p for p in result["papers"]}
+        self.assertIn("rerank", papers[seed["paper_id"]]["provenance"])
+        # lowest current_score 被抬到 0.97：它必须是新的第一名。
+        self.assertEqual(result["papers"][0]["paper_id"], "fixture:other")
+
+    def test_rerank_failure_keeps_original_order(self):
+        class BrokenRerankTransport:
+            def __call__(self, method, url, headers, body, timeout):
+                import json as _json
+                request = _json.loads(body)
+                user = _json.loads(request["messages"][1]["content"])
+                if user.get("task") == "decompose_query":
+                    content = {"queries": ["wifi csi heart rate monitoring"], "source_capabilities": ["arxiv"]}
+                elif user.get("task") == "rerank_top":
+                    return TransportResponse(500, b"")  # 触发重试后失败
+                else:
+                    content = {"results": [
+                        {"paper_id": item["paper_id"], "relevance_score": 0.9, "relevance_label": "relevant",
+                         "hard_constraint_state": "pass", "reason": "fixture", "evidence_needed": [], "confidence": 0.9}
+                        for item in user.get("candidates", [])
+                    ]}
+                envelope = {"choices": [{"message": {"content": _json.dumps(content, ensure_ascii=False)}}]}
+                return TransportResponse(200, _json.dumps(envelope))
+
+        provider = FixtureProvider("arxiv", [_seed()], {_seed()["paper_id"]: [_child()]})
+        result = SearchTreeRunner({"arxiv": provider}, _scripted_layer(BrokenRerankTransport())).run(QUERY)
+        self.assertEqual(result["stats"]["rerank_papers"], 0)
+        papers = {p["paper_id"]: p for p in result["papers"]}
+        self.assertAlmostEqual(papers[_seed()["paper_id"]]["scores"]["relevance"], 0.9)

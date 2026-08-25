@@ -424,8 +424,8 @@ class SearchTreeRunner:
             "You are an academic search strategist. The queries already tried (listed below) cover "
             "some readings of the question, but the answer papers have NOT been found - the retrieved "
             "titles are from wrong fields. The question's key phrase is very likely a METHOD-FAMILY "
-            "name used in a specific field's survey taxonomy (e.g. 'reconstruction-based' is a family "
-            "name in time-series anomaly detection surveys; 'contrastive' in representation learning). "
+            "name used in a specific field's survey taxonomy (e.g. 'contrastive' in representation "
+            "learning surveys; 'generative' in adversarial model surveys). "
             "Ask yourself: which field's surveys classify methods under this exact family name, where "
             "the answering papers would never use the phrase itself? Produce 1-2 short keyword queries "
             "in THAT field's own terminology (field words + the underlying technique), NOT repeating "
@@ -520,6 +520,73 @@ class SearchTreeRunner:
             for text in (str(subquery.get("query_text") or "").strip() for subquery in fresh)
             if text and _norm_query(text) not in searched_norm
         ][: self.queries_per_level]
+
+    _RERANK_SYSTEM_PROMPT = (
+        "You are the final referee for one academic search question. Below are its top candidate "
+        "papers (title, abstract snippet, current score). Many share the same score band, but only "
+        "some actually ANSWER the question; the rest are merely adjacent work or surveys. Compare "
+        "the candidates WITH EACH OTHER and re-score: papers that directly answer the question get "
+        "0.90-0.98 (spread by confidence, do not tie), adjacent work 0.50-0.80, off-topic below 0.4. "
+        "Use the full range and avoid clustering. Return JSON only: "
+        '{"results": [{"paper_id": "...", "score": 0.0-1.0}]}. '
+        "Return every given paper_id exactly once. Never invent paper facts."
+    )
+
+    def _rerank_top_n(self, query: str, pool: list[dict[str, Any]], errors: list[dict[str, Any]], *, top_n: int = 30) -> int:
+        """终局比较式重排：把前 top_n 篇一起交给 LLM 对比打分，就地更新分数。
+
+        失败（无 LLM/预算/解析错误/ID 对不上）直接返回 0，保持原序——重排
+        是增益件不是依赖件。
+        """
+
+        scored = [
+            paper for paper in pool
+            if isinstance((paper.get("scores") or {}).get("relevance"), (int, float))
+            and not isinstance((paper.get("scores") or {}).get("relevance"), bool)
+        ]
+        scored.sort(key=lambda paper: (-float(paper["scores"]["relevance"]), str(paper.get("paper_id"))))
+        top = scored[:top_n]
+        layer = self.understanding_layer
+        client = getattr(layer, "client", None)
+        if len(top) < 2 or layer is None or not self._llm_budget_left() or not callable(getattr(client, "complete_json", None)):
+            return 0
+        candidates = [
+            {
+                "paper_id": str(paper.get("paper_id")),
+                "title": str((paper.get("bibliography") or {}).get("title") or ""),
+                "abstract": str((paper.get("bibliography") or {}).get("abstract") or "")[:300],
+                "current_score": float(paper["scores"]["relevance"]),
+            }
+            for paper in top
+        ]
+        user = json.dumps({"task": "rerank_top", "query": query, "candidates": candidates}, ensure_ascii=False)
+        try:
+            payload = self._call_llm(lambda: client.complete_json(self._RERANK_SYSTEM_PROMPT, user, max_tokens=2500))
+        except _LLM_ERRORS as exc:
+            errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "rerank_skip")), "message": str(exc)[:200], "stage": "rerank"})
+            return 0
+        values = payload.get("results")
+        if not isinstance(values, list):
+            return 0
+        top_ids = {str(paper.get("paper_id")) for paper in top}
+        by_id = {str(paper.get("paper_id")): paper for paper in top}
+        seen: set[str] = set()
+        applied = 0
+        for item in values:
+            if not isinstance(item, Mapping):
+                continue
+            paper_id = str(item.get("paper_id") or "")
+            score = item.get("score")
+            if paper_id not in top_ids or paper_id in seen:
+                continue
+            if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= float(score) <= 1:
+                continue
+            seen.add(paper_id)
+            paper = by_id[paper_id]
+            paper["provenance"].setdefault("rerank", {})["before"] = float(paper["scores"]["relevance"])
+            paper["scores"]["relevance"] = round(float(score), 6)
+            applied += 1
+        return applied
 
     def _judge_new_papers(
         self,
@@ -630,8 +697,13 @@ class SearchTreeRunner:
         children: list[dict[str, Any]] = []
         calls_used = 1  # 正文获取（HTML/PDF 下载）
         searched_sources = [name for name, provider in self.router.providers.items() if callable(getattr(provider, "search", None))]
+        # 点名限流：每种子最多 4 次检索（1 次正文获取 + 4 次查回），
+        # 防止单种子在 L0 烧穿预算（side 会话 8.8：L0 曾烧 44/61 次）。
+        max_pick_searches = 4
         for pick in picks[:4]:
             for name in searched_sources:
+                if calls_used >= 1 + max_pick_searches:
+                    break
                 if provider_calls + len(children) >= self.max_provider_calls:
                     break
                 calls_used += 1
@@ -873,19 +945,22 @@ class SearchTreeRunner:
             for seed in candidates:
                 if provider_calls >= self.max_provider_calls:
                     break
+                # L0 留粮：L0 扩展最多吃 60% provider 预算，剩余必须留给 L1
+                # （side 会话 8.8 诊断：L0 点名烧光预算，L1 整层
+                # BUDGET_EXHAUSTED，消歧续搜永远没机会跑）。
+                if level == 0 and provider_calls >= int(self.max_provider_calls * 0.6):
+                    break
                 seed_id = str(seed["paper_id"])
                 expanded_ids.add(seed_id)
-                # 正文点名扩展：读种子正文 → LLM 从参考文献列表点名 → 标题查回。
-                # 优先于 OpenAlex 随机引用列表（hybrid），失败按模式兜底。
+                # 双腿扩展（收集全原则）：正文点名和 OpenAlex 列表两条腿都走，
+                # 交叉验证——hybrid 点名窄而准，列表宽而全（老论文多藏在
+                # 列表深处，test_8 的 Gold 四轮 hybrid 全零池的病根）。
                 if self.expand_mode in ("hybrid", "fulltext"):
                     got, used = self._expand_via_fulltext(seed, query, edges, edge_keys, child_meta, errors, level, provider_calls)
                     fulltext_calls += 1 if got is not None else 0
                     provider_calls += used
                     if got:
                         child_records.extend(got)
-                        continue
-                    if self.expand_mode == "fulltext":
-                        continue
                 selected = self._relations_provider(seed)
                 if selected is None:
                     errors.append({"source": "search_tree", "code": "config", "message": "no relations provider for relevant paper", "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})
@@ -895,7 +970,7 @@ class SearchTreeRunner:
                 citation_calls += 1
                 relation_calls += 1
                 try:
-                    result = _relation_call(provider, seed_id, "references", self.page_size)
+                    result = _relation_call(provider, seed_id, "references", max(self.page_size, 25))
                 except Exception as exc:
                     errors.append({"source": source, "code": str(getattr(exc, "code", "unknown")), "message": str(exc)[:200], "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})
                     # arXiv 等来源的 relations 是显式 unsupported 存根：记住它，
@@ -968,6 +1043,11 @@ class SearchTreeRunner:
         # 在循环内永远等不到下一轮判断。循环结束后补判一轮：LLM 预算内优先、
         # 引用子优先，无预算退词法分——出池论文不允许 relevance=None 沉底。
         self._judge_new_papers(pool, judged_ids, judge_plan, scoring_plan, errors, "judge_final")
+        # 前 30 比较式重排：孤立打分把 20-30 篇同领域论文挤在同一档
+        # （test_20：金标 0.85 排 22，门槛恰好 0.85），只有放在一起比较才能
+        # 分出"真正回答问题的"和"只是同领域的"。
+        reranked = self._rerank_top_n(query, pool, errors)
+        stats_reranked = reranked
 
         papers = sorted(pool, key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
         usage = getattr(client, "usage", None) if client is not None else None
@@ -983,6 +1063,7 @@ class SearchTreeRunner:
             "llm_prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
             "llm_completion_tokens": int(usage.get("completion_tokens", 0) or 0),
             "llm_total_tokens": int(usage.get("total_tokens", 0) or 0),
+            "rerank_papers": stats_reranked,
             "levels": len(nodes),
             "papers": len(papers),
             "edges": len(edges),
