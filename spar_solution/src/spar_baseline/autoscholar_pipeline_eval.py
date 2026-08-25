@@ -35,6 +35,7 @@ def run_pipeline_eval(
     exclude_sources: tuple[str, ...] = ("bohrium",),
     strategy: str = "pipeline",
     fulltext_topk: int = 0,
+    expand_mode: str = "openalex",
 ) -> dict[str, Any]:
     rows = load_rows(dataset, offset=offset, limit=limit)
     if not rows:
@@ -48,7 +49,7 @@ def run_pipeline_eval(
     if strategy == "tree":
         # 直接复用已排除无效来源的 providers 与 LLM 层。
         from .search_tree import SearchTreeRunner
-        tree_runner = SearchTreeRunner(pipeline.providers, pipeline.understanding_layer, page_size=page_size)
+        tree_runner = SearchTreeRunner(pipeline.providers, pipeline.understanding_layer, page_size=page_size, expand_mode=expand_mode)
 
     output_root = Path(output)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -174,8 +175,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sleep", type=float, default=3.0)
     parser.add_argument("--strategy", choices=("pipeline", "tree"), default="pipeline")
     parser.add_argument("--fulltext-topk", type=int, default=0, help="仅 tree 策略：对前 K 篇做本地全文抽取增强（0=关闭）")
+    parser.add_argument("--expand-mode", choices=("openalex", "hybrid", "fulltext"), default="openalex", help="引用扩展方式：openalex=随机列表；hybrid=正文点名优先、openalex 兜底；fulltext=仅正文")
     args = parser.parse_args(argv)
-    payload = run_pipeline_eval(args.dataset, args.output, offset=args.offset, limit=args.limit, page_size=args.page_size, sleep_seconds=args.sleep, strategy=args.strategy, fulltext_topk=args.fulltext_topk)
+    payload = run_pipeline_eval(args.dataset, args.output, offset=args.offset, limit=args.limit, page_size=args.page_size, sleep_seconds=args.sleep, strategy=args.strategy, fulltext_topk=args.fulltext_topk, expand_mode=args.expand_mode)
     print(json.dumps({"output": args.output, "results": payload["results"], "totals": payload["totals"]}, ensure_ascii=False, indent=2))
     return 0
 

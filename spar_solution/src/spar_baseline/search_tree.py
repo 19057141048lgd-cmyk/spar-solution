@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping
 
@@ -144,7 +145,11 @@ class SearchTreeRunner:
         page_size: int = 10,
         max_provider_calls: int = 30,
         max_llm_calls: int = 20,
+        expand_mode: str = "openalex",
+        fulltext_cache: "str | Path | None" = None,
     ) -> None:
+        if expand_mode not in ("hybrid", "fulltext", "openalex"):
+            raise ValueError("expand_mode must be hybrid, fulltext or openalex")
         if max_depth < 1 or queries_per_level < 1 or page_size < 1:
             raise ValueError("max_depth, queries_per_level and page_size must be positive")
         if docs_to_expand < 0 or max_provider_calls < 0 or max_llm_calls < 0:
@@ -160,6 +165,8 @@ class SearchTreeRunner:
         self.page_size = int(page_size)
         self.max_provider_calls = int(max_provider_calls)
         self.max_llm_calls = int(max_llm_calls)
+        self.expand_mode = expand_mode
+        self.fulltext_cache = fulltext_cache
         self.router = SourceRouter(providers)
         self.recall_runner = RecallRunner(self.router, page_size=self.page_size)
         self.planner = QueryPlanner()
@@ -334,6 +341,78 @@ class SearchTreeRunner:
     # ------------------------------------------------------------------
     # 引用扩展
     # ------------------------------------------------------------------
+
+    def _expand_via_fulltext(
+        self,
+        seed: Mapping[str, Any],
+        query: str,
+        edges: list[dict[str, Any]],
+        edge_keys: set[tuple[str, str, str]],
+        child_meta: dict[str, dict[str, Any]],
+        errors: list[dict[str, Any]],
+        level: int,
+        provider_calls: int,
+    ) -> "tuple[list[dict[str, Any]] | None, int]":
+        """正文点名扩展：读种子正文，LLM 从参考文献列表挑 2-4 条，标题查回。
+
+        返回 (子 PaperDoc 列表或 None, 消耗的 provider 调用数)；正文不可用
+        返回 (None, 0)，hybrid 模式退 OpenAlex。点名计 1 次 LLM 预算。
+        """
+
+        try:
+            from .fulltext_flow import load_paper_fulltext, pick_references
+            from .identity import normalize_title
+        except ImportError:
+            return None, 0
+        cache = self.fulltext_cache or Path(__file__).resolve().parents[1] / "artifacts" / "flow-cache"
+        try:
+            fulltext = load_paper_fulltext(seed, cache_dir=cache)
+        except Exception as exc:
+            errors.append({"source": "fulltext", "code": "load_failed", "message": str(exc)[:160], "stage": f"expand_L{level}", "details": {"paper_id": str(seed.get("paper_id"))}})
+            return None, 0
+        if fulltext.source == "none" or not fulltext.references_text:
+            return None, 0
+        client = getattr(self.understanding_layer, "client", None) if self.understanding_layer is not None else None
+        if not self._llm_budget_left():
+            return None, 0
+        self._llm_calls += 1
+        picks = pick_references(client, query, fulltext, max_picks=4)
+        if not picks:
+            return None, 1
+        seed_id = str(seed.get("paper_id"))
+        children: list[dict[str, Any]] = []
+        calls_used = 1  # 正文获取（HTML/PDF 下载）
+        searched_sources = [name for name, provider in self.router.providers.items() if callable(getattr(provider, "search", None))]
+        for pick in picks[:4]:
+            for name in searched_sources:
+                if provider_calls + len(children) >= self.max_provider_calls:
+                    break
+                calls_used += 1
+                try:
+                    result = self.router.providers[name].search(pick["query"], page_size=3)
+                except Exception:
+                    continue
+                match = next((c for c in result.records[:2] if normalize_title(c.get("bibliography", {}).get("title") or "") == normalize_title(pick["query"])), None)
+                if match is None:
+                    continue
+                child = dict(match)
+                child_id = str(child.get("paper_id"))
+                edge_key = (seed_id, child_id, "references")
+                if edge_key not in edge_keys:
+                    edge_keys.add(edge_key)
+                    edges.append({"parent": seed_id, "child": child_id, "relation_type": "references", "source": "fulltext", "depth": level + 1})
+                child.setdefault("provenance", {})["parent_node_id"] = seed_id
+                child.setdefault("provenance", {})["citation_depth"] = level + 1
+                child.setdefault("provenance", {})["relation_source"] = "fulltext"
+                child.setdefault("provenance", {})["pick_reason"] = str(pick.get("reason") or "")[:160]
+                try:
+                    validate_paper_doc(child)
+                except Exception:
+                    continue
+                children.append(child)
+                child_meta[child_id] = {"parent_paper_id": seed_id, "relation_type": "references"}
+                break
+        return children, calls_used
 
     def _relations_provider(self, seed: Mapping[str, Any]) -> tuple[str, Any] | None:
         """按论文来源优先选择带 relations 方法的 Provider。"""
@@ -531,11 +610,23 @@ class SearchTreeRunner:
             citation_calls = 0
             child_records: list[dict[str, Any]] = []
             child_meta: dict[str, dict[str, Any]] = {}
+            fulltext_calls = 0
             for seed in candidates:
                 if provider_calls >= self.max_provider_calls:
                     break
                 seed_id = str(seed["paper_id"])
                 expanded_ids.add(seed_id)
+                # 正文点名扩展：读种子正文 → LLM 从参考文献列表点名 → 标题查回。
+                # 优先于 OpenAlex 随机引用列表（hybrid），失败按模式兜底。
+                if self.expand_mode in ("hybrid", "fulltext"):
+                    got, used = self._expand_via_fulltext(seed, query, edges, edge_keys, child_meta, errors, level, provider_calls)
+                    fulltext_calls += 1 if got is not None else 0
+                    provider_calls += used
+                    if got:
+                        child_records.extend(got)
+                        continue
+                    if self.expand_mode == "fulltext":
+                        continue
                 selected = self._relations_provider(seed)
                 if selected is None:
                     errors.append({"source": "search_tree", "code": "config", "message": "no relations provider for relevant paper", "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})

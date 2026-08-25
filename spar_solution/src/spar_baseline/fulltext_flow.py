@@ -300,33 +300,41 @@ def dual_review(client: Any, question: str, candidates: Sequence[Mapping[str, An
     返回每篇 {paper_id, score_a, score_b, final, status: keep/uncertain/reject}。
     """
 
-    items = [{"paper_n": i, "title": (p.get("bibliography") or {}).get("title"), "abstract": str((p.get("bibliography") or {}).get("abstract") or "")[:600]} for i, p in enumerate(candidates)]
-    scores: dict[int, dict[str, float]] = {}
-    for label, prompt, threshold in (("score_a", REVIEWER_A_PROMPT, 0.6), ("score_b", REVIEWER_B_PROMPT, 0.5)):
-        for i in range(len(items)):
-            scores.setdefault(i, {})[label] = 0.0
-        if client is None:
-            continue
-        try:
-            result = client.complete_json(prompt, json.dumps({"question": question, "candidates": items}, ensure_ascii=False), max_tokens=1200)
-            for verdict in result.get("verdicts") or []:
-                try:
-                    n = int(verdict.get("paper_n"))
-                    scores[n][label] = max(0.0, min(1.0, float(verdict.get("score") or 0.0)))
-                except (TypeError, ValueError, KeyError):
-                    continue
-        except Exception:
-            continue
+    items = [{"paper_n": i, "title": (p.get("bibliography") or {}).get("title"), "abstract": str((p.get("bibliography") or {}).get("abstract") or "")[:500]} for i, p in enumerate(candidates)]
+    scores: dict[int, dict[str, float]] = {i: {"score_a": None, "score_b": None} for i in range(len(items))}
+    # 分批评审（每批 5 篇）防响应截断；失败显式记录而不是伪装 0 分。
+    chunks = [items[i : i + 5] for i in range(0, len(items), 5)] or [[]]
+    for label, prompt in (("score_a", REVIEWER_A_PROMPT), ("score_b", REVIEWER_B_PROMPT)):
+        for chunk in chunks:
+            if client is None:
+                break
+            try:
+                result = client.complete_json(prompt, json.dumps({"question": question, "candidates": chunk}, ensure_ascii=False), max_tokens=900)
+                for verdict in result.get("verdicts") or []:
+                    try:
+                        n = int(verdict.get("paper_n"))
+                        scores[n][label] = max(0.0, min(1.0, float(verdict.get("score") or 0.0)))
+                    except (TypeError, ValueError, KeyError):
+                        continue
+            except Exception:
+                for item in chunk:
+                    scores[item["paper_n"]][label] = None  # 评审不可用：显式缺失
     output = []
     for i, paper in enumerate(candidates):
         a, b = scores[i]["score_a"], scores[i]["score_b"]
-        if a >= 0.6 and b >= 0.5:
-            status = "keep"
+        if a is None and b is None:
+            status, final = "review_failed", None
+        elif a is None or b is None:
+            known = a if a is not None else b
+            status = "keep" if known >= 0.6 else "reject"
+            final = round(known, 4)
+        elif a >= 0.6 and b >= 0.5:
+            status, final = "keep", round((a + b) / 2, 4)
         elif a >= 0.35 and b >= 0.35:
-            status = "uncertain"
+            status, final = "uncertain", round((a + b) / 2, 4)
         else:
-            status = "reject"
-        output.append({"paper_id": str(paper.get("paper_id")), "score_a": a, "score_b": b, "final": round((a + b) / 2, 4), "status": status})
+            status, final = "reject", round((a + b) / 2, 4)
+        output.append({"paper_id": str(paper.get("paper_id")), "score_a": a, "score_b": b, "final": final, "status": status})
     return output
 
 

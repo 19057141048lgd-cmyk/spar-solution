@@ -68,10 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     tree.add_argument("--docs-to-expand", type=int, default=8)
     tree.add_argument("--max-provider-calls", type=int, default=30)
     tree.add_argument("--fulltext-topk", type=int, default=0, help="对前 K 篇做本地全文抽取增强（0=关闭）")
+    tree.add_argument("--expand-mode", choices=("openalex", "hybrid", "fulltext"), default="openalex", help="引用扩展方式")
     return parser
 
 
-def build_tree_runner(config: Mapping[str, Any] | None = None, *, page_size: int = 10, max_depth: int = 2, docs_to_expand: int = 8, max_provider_calls: int = 30) -> "SearchTreeRunner":
+def build_tree_runner(config: Mapping[str, Any] | None = None, *, page_size: int = 10, max_depth: int = 2, docs_to_expand: int = 8, max_provider_calls: int = 30, expand_mode: str = "openalex") -> "SearchTreeRunner":
     """用与 P2 live 相同的 Provider/LLM 装配构造搜索树检索器。"""
 
     pipeline = build_live_pipeline(config, citation_enabled=True, page_size=page_size)
@@ -82,6 +83,7 @@ def build_tree_runner(config: Mapping[str, Any] | None = None, *, page_size: int
         max_depth=max_depth,
         docs_to_expand=docs_to_expand,
         max_provider_calls=max_provider_calls,
+        expand_mode=expand_mode,
     )
 
 
@@ -95,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         run = pipeline.run(args.query, output_dir=args.output)
         result = evaluate_p2_run(run)
     elif args.command == "tree":
-        runner = build_tree_runner(page_size=args.page_size, max_depth=args.max_depth, docs_to_expand=args.docs_to_expand, max_provider_calls=args.max_provider_calls)
+        runner = build_tree_runner(page_size=args.page_size, max_depth=args.max_depth, docs_to_expand=args.docs_to_expand, max_provider_calls=args.max_provider_calls, expand_mode=getattr(args, "expand_mode", "openalex"))
         tree_result = runner.run(args.query)
         if getattr(args, "fulltext_topk", 0) > 0:
             from .fulltext import augment_topk, query_terms
