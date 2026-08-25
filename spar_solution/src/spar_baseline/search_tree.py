@@ -524,10 +524,10 @@ class SearchTreeRunner:
     _RERANK_SYSTEM_PROMPT = (
         "You are the final referee for one academic search question. Below are its top candidate "
         "papers (title, abstract snippet, current score). Many share the same score band, but only "
-        "some actually ANSWER the question; the rest are merely adjacent work or surveys. Compare "
-        "the candidates WITH EACH OTHER and re-score: papers that directly answer the question get "
-        "0.90-0.98 (spread by confidence, do not tie), adjacent work 0.50-0.80, off-topic below 0.4. "
-        "Use the full range and avoid clustering. Return JSON only: "
+        "some actually ANSWER the question. Compare the candidates WITH EACH OTHER: give 0.90-0.98 "
+        "(spread by confidence, do not tie) ONLY to papers that directly answer the question, and "
+        "give everything else a score below your answer threshold (their current score will be "
+        "kept regardless - only your 0.90+ verdicts take effect as promotions). Return JSON only: "
         '{"results": [{"paper_id": "...", "score": 0.0-1.0}]}. '
         "Return every given paper_id exactly once. Never invent paper facts."
     )
@@ -582,10 +582,17 @@ class SearchTreeRunner:
             if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= float(score) <= 1:
                 continue
             seen.add(paper_id)
-            paper = by_id[paper_id]
-            paper["provenance"].setdefault("rerank", {})["before"] = float(paper["scores"]["relevance"])
-            paper["scores"]["relevance"] = round(float(score), 6)
-            applied += 1
+            # 只升不降：重排是增益件——只有 ≥0.9 的"答案级"判定可以抬高
+            # 分数（把同分段金标捞出来），其余一律保持原分。phase-a 实测
+            # 对称重排曾把金标 0.85 降到 0.78（test_8 排位 24），副作用
+            # 必须结构性杜绝。
+            if float(score) >= 0.9:
+                paper = by_id[paper_id]
+                before = float(paper["scores"]["relevance"])
+                if float(score) > before:
+                    paper["provenance"].setdefault("rerank", {})["before"] = before
+                    paper["scores"]["relevance"] = round(float(score), 6)
+                    applied += 1
         return applied
 
     def _judge_new_papers(
@@ -952,57 +959,57 @@ class SearchTreeRunner:
                     break
                 seed_id = str(seed["paper_id"])
                 expanded_ids.add(seed_id)
-                # 双腿扩展（收集全原则）：正文点名和 OpenAlex 列表两条腿都走，
-                # 交叉验证——hybrid 点名窄而准，列表宽而全（老论文多藏在
-                # 列表深处，test_8 的 Gold 四轮 hybrid 全零池的病根）。
-                if self.expand_mode in ("hybrid", "fulltext"):
+                # 宽腿先行：列表腿 1 次调用换 25 篇，正文腿最多 5 次调用换
+                # 2-4 篇；phase-a 实测穷腿先吃预算导致 L0 池 205→88 篇
+                # （test_3/20 回退的病根）。先宽后窄，预算不够时只砍穷腿。
+                selected = self._relations_provider(seed)
+                if selected is not None:
+                    source, provider = selected
+                    provider_calls += 1
+                    citation_calls += 1
+                    relation_calls += 1
+                    try:
+                        result = _relation_call(provider, seed_id, "references", max(self.page_size, 25))
+                    except Exception as exc:
+                        errors.append({"source": source, "code": str(getattr(exc, "code", "unknown")), "message": str(exc)[:200], "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})
+                        # arXiv 等来源的 relations 是显式 unsupported 存根：记住它，
+                        # 本 run 后续种子直接换下一家，不再浪费种子槽位。
+                        if str(getattr(exc, "code", "")) == "unsupported":
+                            self._relations_unsupported.add(source)
+                        result = None
+                    if result is not None:
+                        for record in result.records:
+                            child_id = _child_id(record)
+                            if not child_id:
+                                errors.append({"source": source, "code": "parse", "message": "relation record has no stable child identifier", "stage": f"expand_L{level}", "details": {"parent_paper_id": seed_id}})
+                                continue
+                            relation_type = _relation_type(record, "references")
+                            edge_key = (seed_id, child_id, relation_type)
+                            if edge_key not in edge_keys:
+                                edge_keys.add(edge_key)
+                                edges.append({"parent": seed_id, "child": child_id, "relation_type": relation_type, "depth": level + 1})
+                            nested = _nested_paper(record)
+                            if nested is None:
+                                continue
+                            child = dict(nested)
+                            child.setdefault("provenance", {})["parent_node_id"] = seed_id
+                            child.setdefault("provenance", {})["citation_depth"] = level + 1
+                            try:
+                                validate_paper_doc(child)
+                            except Exception as exc:
+                                errors.append({"source": source, "code": "parse", "message": f"invalid child PaperDoc: {exc}"[:200], "stage": f"expand_L{level}", "details": {"parent_paper_id": seed_id}})
+                                continue
+                            child_records.append(child)
+                            meta = {"parent_paper_id": seed_id, "relation_type": relation_type}
+                            child_meta[child_id] = meta
+                            child_meta.setdefault(str(child.get("paper_id") or ""), meta)
+                # 窄腿殿后（收集全原则的第二条腿）：正文点名，宽腿之后用剩余预算。
+                if self.expand_mode in ("hybrid", "fulltext") and provider_calls < self.max_provider_calls:
                     got, used = self._expand_via_fulltext(seed, query, edges, edge_keys, child_meta, errors, level, provider_calls)
                     fulltext_calls += 1 if got is not None else 0
                     provider_calls += used
                     if got:
                         child_records.extend(got)
-                selected = self._relations_provider(seed)
-                if selected is None:
-                    errors.append({"source": "search_tree", "code": "config", "message": "no relations provider for relevant paper", "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})
-                    continue
-                source, provider = selected
-                provider_calls += 1
-                citation_calls += 1
-                relation_calls += 1
-                try:
-                    result = _relation_call(provider, seed_id, "references", max(self.page_size, 25))
-                except Exception as exc:
-                    errors.append({"source": source, "code": str(getattr(exc, "code", "unknown")), "message": str(exc)[:200], "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})
-                    # arXiv 等来源的 relations 是显式 unsupported 存根：记住它，
-                    # 本 run 后续种子直接换下一家，不再浪费种子槽位。
-                    if str(getattr(exc, "code", "")) == "unsupported":
-                        self._relations_unsupported.add(source)
-                    continue
-                for record in result.records:
-                    child_id = _child_id(record)
-                    if not child_id:
-                        errors.append({"source": source, "code": "parse", "message": "relation record has no stable child identifier", "stage": f"expand_L{level}", "details": {"parent_paper_id": seed_id}})
-                        continue
-                    relation_type = _relation_type(record, "references")
-                    edge_key = (seed_id, child_id, relation_type)
-                    if edge_key not in edge_keys:
-                        edge_keys.add(edge_key)
-                        edges.append({"parent": seed_id, "child": child_id, "relation_type": relation_type, "depth": level + 1})
-                    nested = _nested_paper(record)
-                    if nested is None:
-                        continue
-                    child = dict(nested)
-                    child.setdefault("provenance", {})["parent_node_id"] = seed_id
-                    child.setdefault("provenance", {})["citation_depth"] = level + 1
-                    try:
-                        validate_paper_doc(child)
-                    except Exception as exc:
-                        errors.append({"source": source, "code": "parse", "message": f"invalid child PaperDoc: {exc}"[:200], "stage": f"expand_L{level}", "details": {"parent_paper_id": seed_id}})
-                        continue
-                    child_records.append(child)
-                    meta = {"parent_paper_id": seed_id, "relation_type": relation_type}
-                    child_meta[child_id] = meta
-                    child_meta.setdefault(str(child.get("paper_id") or ""), meta)
             if child_records:
                 ids_before_children = set(pool_ids)
                 merged, merge_errors = _deduplicate([*pool, *child_records])
