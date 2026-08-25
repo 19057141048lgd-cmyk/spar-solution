@@ -17,6 +17,7 @@ from typing import Any, Mapping
 from .autoscholar_baseline import _norm_arxiv, load_rows
 from .p2_cli import build_live_pipeline
 from .p2_metrics import evaluate_p2_run
+from .pasa_metrics import aggregate_pasa_style, evaluate_pasa_style
 
 
 def _f1(precision: float, recall: float) -> float:
@@ -76,6 +77,7 @@ def run_pipeline_eval(
                     (run_dir / f"{name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 (run_dir / "run_manifest.json").write_text(json.dumps({"schema_version": "search_tree_run.v1", "query": question, "stop_reason": tree_result["stop_reason"], "stats": tree_result["stats"]}, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 result = evaluate_p2_run({"papers": tree_result["papers"]}, gold_ids=gold, cutoffs=(10, 20))
+                item["pasa_style"] = evaluate_pasa_style(tree_result["papers"], row.get("answer") or [])
                 cost = tree_result.get("stats") or {}
                 item.update({
                     "planner_source": cost.get("planner_source"),
@@ -93,6 +95,7 @@ def run_pipeline_eval(
             else:
                 run = pipeline.run(question, output_dir=run_dir)
                 result = evaluate_p2_run(run, gold_ids=gold, cutoffs=(10, 20))
+                item["pasa_style"] = evaluate_pasa_style(run.papers, row.get("answer") or [])
                 manifest = run.manifest
                 cost = manifest.get("cost") or {}
                 item.update({
@@ -140,7 +143,7 @@ def run_pipeline_eval(
         "strategy": strategy,
         "excluded_sources": list(exclude_sources),
         "execution": "live_p2_pipeline" if strategy == "pipeline" else "live_search_tree",
-        "results": {"at_10": aggregate(10), "at_20": aggregate(20)},
+        "results": {"at_10": aggregate(10), "at_20": aggregate(20), "pasa_style": aggregate_pasa_style(item.get("pasa_style") for item in per_query if item.get("pasa_style"))},
         "totals": {
             "wall_ms": round((time.perf_counter() - started) * 1000, 3),
             "provider_calls": sum(int(item.get("provider_calls") or 0) for item in per_query),
