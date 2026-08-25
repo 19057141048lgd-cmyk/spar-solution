@@ -37,6 +37,17 @@ _QUESTION_SHELL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 领域消歧系统提示（命中率优先：宁可多搜几个领域的门，也不能照字面进错街区）。
+_DISAMBIGUATE_SYSTEM_PROMPT = (
+    "You are an academic search strategist. The question's wording often does not match the "
+    "terminology of the research field it came from: words like 'reconstruction', 'hybrid', "
+    "'calibration', 'alignment' mean different things in different fields. First infer 2-4 "
+    "DISTINCT research fields the question could belong to, then write ONE short keyword-style "
+    "query per field using that field's own terminology (what its papers would say). "
+    "Return JSON only: {\"fields\": [{\"field\": \"...\", \"query\": \"...\"}]}. "
+    "Never invent paper facts."
+)
+
 
 def _sanitize_query(text: str) -> str:
     """把送进 Provider 的检索式洗净：剥掉疑问壳/礼貌词。
@@ -183,14 +194,16 @@ class SearchTreeRunner:
         max_llm_calls: int = 20,
         expand_mode: str = "openalex",
         fulltext_cache: "str | Path | None" = None,
-        max_judge_papers: int = 40,
+        max_judge_papers: "int | None" = None,
     ) -> None:
         if expand_mode not in ("hybrid", "fulltext", "openalex"):
             raise ValueError("expand_mode must be hybrid, fulltext or openalex")
         if max_depth < 1 or queries_per_level < 1 or page_size < 1:
             raise ValueError("max_depth, queries_per_level and page_size must be positive")
-        if docs_to_expand < 0 or max_provider_calls < 0 or max_llm_calls < 0 or max_judge_papers < 0:
+        if docs_to_expand < 0 or max_provider_calls < 0 or max_llm_calls < 0:
             raise ValueError("docs_to_expand and call budgets must be non-negative")
+        if max_judge_papers is not None and (isinstance(max_judge_papers, bool) or max_judge_papers < 0):
+            raise ValueError("max_judge_papers must be a non-negative integer or null")
         if not 0 <= relevance_threshold <= 1:
             raise ValueError("relevance_threshold must be between 0 and 1")
         self.providers = providers
@@ -204,12 +217,10 @@ class SearchTreeRunner:
         self.max_llm_calls = int(max_llm_calls)
         self.expand_mode = expand_mode
         self.fulltext_cache = fulltext_cache
-        # 判分预算调度：token 红线（≤5 万/题）的硬约束。宽度放大后池子可达
-        # 130-180 篇，全量 LLM 判断实测 5-8 万 token/题超线（sentinel-p1-full）。
-        # 只判优先级最高的 max_judge_papers 篇（引用子优先，其次融合序），
-        # 其余退词法分（×0.7 折扣排序）——未判分者仍在 ranked_pool 里供
-        # recall@50/100，只是不消耗判分预算。
-        self.max_judge_papers = int(max_judge_papers)
+        # 判分预算调度：默认不设上限（2026-08-25 用户裁定——命中率优先阶段
+        # 放开 token，全部候选交给 LLM 判断；效率优化留到命中率达标的阶段）。
+        # max_judge_papers 保留为参数，供之后效率阶段按题启用。
+        self.max_judge_papers = None if max_judge_papers is None else int(max_judge_papers)
         self.router = SourceRouter(providers)
         self.recall_runner = RecallRunner(self.router, page_size=self.page_size)
         self.planner = QueryPlanner()
@@ -251,6 +262,43 @@ class SearchTreeRunner:
     # ------------------------------------------------------------------
     # 查询生成
     # ------------------------------------------------------------------
+
+    def _disambiguate_queries(self, query: str, errors: list[dict[str, Any]]) -> list[str]:
+        """L0 前置领域消歧：按问题可能属于的 2-4 个领域各出一条领域术语查询。
+
+        问题用词常与出处领域的术语不一致（AutoScholarQuery_test_0 全程跑偏
+        的根因："reconstruction-based"在异常检测=自编码重构误差，在 3D 视觉
+        =三维重建，在信号处理=信号重构——照字面搜索会进错街区且高分错域
+        论文把引用扩展也带偏）。领域查询置于照抄问题的计划查询之前；失败
+        返回 []，调用方保持原行为。消耗 1 次 LLM 调用，不占 provider 预算。
+        """
+
+        layer = self.understanding_layer
+        client = getattr(layer, "client", None)
+        if layer is None or not self._llm_budget_left() or not callable(getattr(client, "complete_json", None)):
+            return []
+        user = json.dumps(
+            {
+                "task": "disambiguate_queries",
+                "query": query,
+                "required": {"fields": "2-4 objects, each with a field name and one short keyword query in that field's own terminology"},
+            },
+            ensure_ascii=False,
+        )
+        try:
+            payload = self._call_llm(lambda: client.complete_json(_DISAMBIGUATE_SYSTEM_PROMPT, user, max_tokens=500))
+        except _LLM_ERRORS as exc:
+            errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "disambiguate_fallback")), "message": str(exc)[:200], "stage": "disambiguate_L0"})
+            return []
+        output: list[str] = []
+        values = payload.get("fields")
+        if isinstance(values, list):
+            for item in values[:4]:
+                if isinstance(item, Mapping):
+                    text = str(item.get("query") or "").strip()
+                    if text:
+                        output.append(text)
+        return output[:4]
 
     def _rephrase_queries(
         self,
@@ -402,9 +450,12 @@ class SearchTreeRunner:
 
         to_judge = [paper for paper in pool if str(paper.get("paper_id")) not in judged_ids]
         to_judge.sort(key=lambda paper: (int((paper.get("provenance") or {}).get("citation_depth") or 0) < 1,))
-        # 判分预算调度：本轮只把预算内的高优先级候选送 LLM，其余直接词法
-        # 兜底。judged_ids 对两者都记账——被预算挤掉的论文不再重试。
-        budget_left = max(0, self.max_judge_papers - self._llm_judge_used)
+        # 判分预算调度：默认不限（None）= 全部候选送 LLM；设置上限时只送
+        # 优先级前 N 篇（引用子优先），其余词法兜底。judged_ids 双向记账。
+        if self.max_judge_papers is None:
+            budget_left = len(to_judge)
+        else:
+            budget_left = max(0, self.max_judge_papers - self._llm_judge_used)
         llm_candidates = to_judge[:budget_left]
         self._llm_judge_used += len(llm_candidates)
         self._judge_capped += len(to_judge) - len(llm_candidates)
@@ -596,6 +647,11 @@ class SearchTreeRunner:
                 level_queries = texts
         if not level_queries:
             level_queries = _plan_queries(base_plan, self.queries_per_level) or [query.strip()]
+        # 领域消歧查询置前（命中率优先）：按各领域自己的术语出词，优先于
+        # 照抄问题的计划查询；消歧失败/无 LLM 时行为不变。
+        disambiguated = self._disambiguate_queries(query, errors)
+        if disambiguated:
+            level_queries = list(dict.fromkeys([*disambiguated, *level_queries]))
         # 任何来源的第 0 层查询（LLM 回显问句/规则兜底）都必须先净化；
         # 单词垃圾查询（规则兜底曾产出 "models"）直接丢弃。
         level_queries = [q for q in dict.fromkeys(_sanitize_query(t) for t in level_queries if _sanitize_query(t)) if len(q.split()) >= 2]
@@ -625,7 +681,7 @@ class SearchTreeRunner:
                 text
                 for text in level_queries
                 if text.strip() and _norm_query(text) not in searched_norm
-            ][: self.queries_per_level]
+            ][: (max(5, self.queries_per_level) if not level else self.queries_per_level)]
             if not level_queries:
                 stop_reason = STOP_NO_NEW_QUERIES
                 break

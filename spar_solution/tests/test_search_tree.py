@@ -53,10 +53,11 @@ class FakeTaskTransport:
     judge_candidates 按请求内候选逐篇回填 relevance_score。
     """
 
-    def __init__(self, *, plan_queries, generated_queries, relevance=0.9):
+    def __init__(self, *, plan_queries, generated_queries, relevance=0.9, disambiguate=None):
         self.plan_queries = list(plan_queries)
         self.generated_queries = list(generated_queries)
         self.relevance = relevance
+        self.disambiguate = list(disambiguate or [])
         self.calls = []
 
     def __call__(self, method, url, headers, body, timeout):
@@ -66,6 +67,8 @@ class FakeTaskTransport:
         self.calls.append(task)
         if task == "decompose_query":
             content = {"queries": list(self.plan_queries), "source_capabilities": ["arxiv"]}
+        elif task == "disambiguate_queries":
+            content = {"fields": [{"field": "fixture field", "query": item} for item in self.disambiguate]}
         elif task == "generate_queries":
             content = {"queries": [{"query_text": item} for item in self.generated_queries]}
         else:
@@ -163,11 +166,13 @@ class SearchTreeRunnerTests(unittest.TestCase):
         self.assertEqual(papers[seed["paper_id"]]["provenance"]["search_node"]["level"], 0)
         self.assertEqual(papers[seed["paper_id"]]["provenance"]["search_node"]["query"], "wifi csi heart rate monitoring")
         self.assertTrue(all(paper["provenance"].get("search_node") is not None for paper in result["papers"]))
-        # 成本：2 次检索 + 1 次引用（L0）+ 1 次检索 + 2 次引用（L1）；4 次 LLM。
+        # 成本：2 次检索 + 1 次引用（L0）+ 1 次检索 + 2 次引用（L1）；5 次 LLM
+        # （plan + 领域消歧 + 两轮判断 + 深层查询生成；消歧未脚本化时返回空
+        # 领域列表，L0 仍用计划查询）。
         self.assertEqual(result["stats"]["provider_calls"], 6)
-        self.assertEqual(result["stats"]["llm_calls"], 4)
+        self.assertEqual(result["stats"]["llm_calls"], 5)
         self.assertEqual(result["stats"]["planner_source"], "llm")
-        self.assertEqual(transport.calls, ["decompose_query", "judge_candidates", "generate_queries", "judge_candidates"])
+        self.assertEqual(transport.calls, ["decompose_query", "disambiguate_queries", "judge_candidates", "generate_queries", "judge_candidates"])
 
     def test_rules_fallback_without_llm(self):
         seed = _seed()
@@ -397,12 +402,12 @@ class FinalJudgePassTests(unittest.TestCase):
         # 末层子论文由循环后的补判轮拿到 LLM 分，而不是 relevance=None 沉底。
         self.assertAlmostEqual(papers["fixture:grandchild"]["scores"]["relevance"], 0.9)
         self.assertTrue(all(paper["scores"].get("relevance") is not None for paper in result["papers"]))
-        # plan + L0 judge + generate + L1 judge + final judge = 5 次 LLM 调用。
+        # plan + 消歧 + L0 judge + generate + L1 judge + final judge = 6 次 LLM 调用。
         self.assertEqual(
             transport.calls,
-            ["decompose_query", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates"],
+            ["decompose_query", "disambiguate_queries", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates"],
         )
-        self.assertEqual(result["stats"]["llm_calls"], 5)
+        self.assertEqual(result["stats"]["llm_calls"], 6)
 
     def test_final_level_children_lexical_fallback_without_llm(self):
         result = SearchTreeRunner({"arxiv": self._provider()}, max_depth=2).run(QUERY)
@@ -482,3 +487,36 @@ class JudgeBudgetCapTests(unittest.TestCase):
         self.assertEqual(result["stats"]["llm_judge_papers"], 0)
         # 判分预算为 0 不影响规划调用；judge_candidates 不应出现。
         self.assertNotIn("judge_candidates", transport.calls)
+
+
+class DisambiguateQueriesTests(unittest.TestCase):
+    """L0 领域消歧：领域术语查询排在照抄问题的计划查询之前；失败退回计划查询。"""
+
+    def test_disambiguated_queries_lead_level0(self):
+        transport = FakeTaskTransport(
+            plan_queries=["wifi csi heart rate monitoring"],
+            generated_queries=[],
+            disambiguate=["reconstruction error anomaly detection", "contactless csi vital signs"],
+        )
+        provider = FixtureProvider("arxiv", [_seed()], {_seed()["paper_id"]: [_child()]})
+        result = SearchTreeRunner({"arxiv": provider}, _scripted_layer(transport), max_depth=1).run(QUERY)
+        # 消歧查询在前，计划查询补位；L0 宽度上限 5 全部保留。
+        self.assertEqual(
+            result["nodes"][0]["queries"],
+            ["reconstruction error anomaly detection", "contactless csi vital signs", "wifi csi heart rate monitoring"],
+        )
+        self.assertIn("disambiguate_queries", transport.calls)
+
+    def test_disambiguation_failure_falls_back_to_plan_queries(self):
+        # 未脚本化消歧 → 返回空领域列表 → L0 保持计划查询，不报错。
+        transport = FakeTaskTransport(plan_queries=["wifi csi heart rate monitoring"], generated_queries=[])
+        provider = FixtureProvider("arxiv", [_seed()], {_seed()["paper_id"]: [_child()]})
+        result = SearchTreeRunner({"arxiv": provider}, _scripted_layer(transport), max_depth=1).run(QUERY)
+        self.assertEqual(result["nodes"][0]["queries"], ["wifi csi heart rate monitoring"])
+        self.assertIn("disambiguate_queries", transport.calls)
+
+    def test_no_llm_means_no_disambiguation_call(self):
+        provider = FixtureProvider("arxiv", [_seed()], {_seed()["paper_id"]: [_child()]})
+        result = SearchTreeRunner({"arxiv": provider}, max_depth=1).run(QUERY)
+        self.assertEqual(result["nodes"][0]["queries"], ["wifi csi heart rate monitoring"])
+        self.assertEqual(result["stats"]["llm_calls"], 0)
