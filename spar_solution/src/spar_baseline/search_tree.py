@@ -343,6 +343,8 @@ class SearchTreeRunner:
             name for name in self.router.providers if name not in sources
         )
         for name in ordered:
+            if name in self._relations_unsupported:
+                continue
             provider = self.router.providers[name]
             if getattr(provider, "library_status", None) == "unavailable":
                 continue
@@ -359,6 +361,7 @@ class SearchTreeRunner:
             raise ValueError("query must be a non-empty string")
         wall_started = perf_counter()
         self._llm_calls = 0
+        self._relations_unsupported: set[str] = set()
         errors: list[dict[str, Any]] = []
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
@@ -391,22 +394,29 @@ class SearchTreeRunner:
         # 第 0 层查询：优先 understanding_layer.plan，失败退规则计划。
         level_queries: list[str] = []
         if self.understanding_layer is not None and callable(getattr(self.understanding_layer, "plan", None)) and self._llm_budget_left():
-            try:
-                candidate = self._call_llm(lambda: self.understanding_layer.plan(query))
-                texts = _plan_queries(candidate, self.queries_per_level)
-            except _LLM_ERRORS as exc:
-                texts = []
-                errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "plan_fallback")), "message": str(exc)[:200], "stage": "plan"})
+            candidate = None
+            # 规划失败重试一次（瞬时网络/限流常见；402 欠费等硬错误两次都失败）。
+            for attempt in range(2):
+                try:
+                    candidate = self._call_llm(lambda: self.understanding_layer.plan(query))
+                    texts = _plan_queries(candidate, self.queries_per_level)
+                    break
+                except _LLM_ERRORS as exc:
+                    texts = []
+                    if attempt == 1:
+                        errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "plan_fallback")), "message": str(exc)[:200], "stage": "plan"})
             if texts:
                 base_plan = candidate
                 planner_source = "llm"
                 level_queries = texts
         if not level_queries:
             level_queries = _plan_queries(base_plan, self.queries_per_level) or [query.strip()]
-        # 任何来源的第 0 层查询（LLM 回显问句/规则兜底）都必须先净化。
-        level_queries = list(dict.fromkeys(_sanitize_query(text) for text in level_queries if _sanitize_query(text)))
+        # 任何来源的第 0 层查询（LLM 回显问句/规则兜底）都必须先净化；
+        # 单词垃圾查询（规则兜底曾产出 "models"）直接丢弃。
+        level_queries = [q for q in dict.fromkeys(_sanitize_query(t) for t in level_queries if _sanitize_query(t)) if len(q.split()) >= 2]
         if not level_queries:
-            level_queries = [_sanitize_query(query)]
+            fallback = _sanitize_query(query)
+            level_queries = [fallback] if len(fallback.split()) >= 2 else [query.strip()]
 
         judge_plan = base_plan.to_dict() if hasattr(base_plan, "to_dict") else dict(base_plan)
         stop_reason = STOP_MAX_DEPTH
@@ -538,6 +548,10 @@ class SearchTreeRunner:
                     result = _relation_call(provider, seed_id, "references", self.page_size)
                 except Exception as exc:
                     errors.append({"source": source, "code": str(getattr(exc, "code", "unknown")), "message": str(exc)[:200], "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})
+                    # arXiv 等来源的 relations 是显式 unsupported 存根：记住它，
+                    # 本 run 后续种子直接换下一家，不再浪费种子槽位。
+                    if str(getattr(exc, "code", "")) == "unsupported":
+                        self._relations_unsupported.add(source)
                     continue
                 for record in result.records:
                     child_id = _child_id(record)
