@@ -292,3 +292,35 @@ class OpenAlexProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArxivSeedResolutionTests(unittest.TestCase):
+    """arXiv 来源种子必须能做引用扩展（arxiv:xxx paper_id 解析成 W-id）。"""
+
+    def test_relations_resolves_arxiv_paper_id_via_doi(self):
+        provider = OpenAlexProvider({"OPENALEX_BASE_URL": "https://api.openalex.org"})
+        state = {"step": 0}
+
+        def transport(method, url, headers, timeout):
+            state["step"] += 1
+            if state["step"] == 1:  # arXiv DOI 解析（版本号必须已剥离）
+                self.assertIn("10.48550/arxiv.2301.12345", url)
+                self.assertNotIn("v2", url)
+                return (200, json.dumps({"id": "https://openalex.org/W99"}))
+            if state["step"] == 2:  # references 第一步：work 对象
+                return (200, json.dumps({"id": "https://openalex.org/W99", "referenced_works": []}))
+            return (200, json.dumps({"results": [], "meta": {"count": 0}}))
+
+        provider.transport = transport
+        result = provider.relations("arxiv:2301.12345v2", relation="references", page_size=5)
+        self.assertEqual(result.ok, True)
+
+    def test_relations_rejects_unknown_arxiv_paper_id(self):
+        provider = OpenAlexProvider({"OPENALEX_BASE_URL": "https://api.openalex.org"})
+
+        def transport(method, url, headers, timeout):
+            return (200, json.dumps({}))
+
+        provider.transport = transport
+        with self.assertRaises(ProviderError):
+            provider.relations("arxiv:not-a-valid-id", relation="references")

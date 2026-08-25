@@ -255,3 +255,24 @@ class SparRankTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdentifierUnionMergeTests(unittest.TestCase):
+    """跨源合并必须保留两侧标识字段（arxiv_id + openalex_id 并存）。"""
+
+    def test_default_merge_unions_identifiers(self):
+        arxiv_copy = _paper("arxiv", "WiFi heart rate abstract text here")
+        arxiv_copy["paper_id"] = "arxiv:2301.12345"
+        arxiv_copy["identifiers"] = dict.fromkeys(arxiv_copy["identifiers"], None)
+        arxiv_copy["identifiers"]["arxiv_id"] = "2301.12345"
+        arxiv_copy["identifiers"]["doi"] = None
+        openalex_copy = _paper("openalex", "WiFi heart rate abstract text here")
+        openalex_copy["paper_id"] = "doi:10.48550/arxiv.2301.12345"
+        openalex_copy["identifiers"]["doi"] = "10.48550/arxiv.2301.12345"
+        openalex_copy["identifiers"]["openalex_id"] = "W42"
+        fused = rrf_fuse({"arxiv": [arxiv_copy], "openalex": [openalex_copy]})
+        self.assertEqual(len(fused), 1)
+        ids = fused[0]["identifiers"]
+        self.assertEqual(ids["arxiv_id"], "2301.12345")
+        self.assertEqual(ids["openalex_id"], "W42")
+        self.assertEqual(ids["doi"], "10.48550/arxiv.2301.12345")

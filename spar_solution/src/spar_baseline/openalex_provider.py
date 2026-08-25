@@ -475,9 +475,24 @@ class OpenAlexProvider:
         if openalex_id and re.fullmatch(r"W\d+", openalex_id, flags=re.IGNORECASE):
             return openalex_id.upper()
 
+        # arXiv 来源的种子（paper_id 形如 "arxiv:2301.12345"）此前无法做引用
+        # 扩展——它们没有 DOI 也没有 W-id，引用接口直接跳过，导致最对题的
+        # 种子大量流失（见零命中题验尸）。arXiv DOI 是确定性映射，多一次
+        # 解析调用即可解锁整个种子池。
+        if value.casefold().startswith("arxiv:"):
+            arxiv_id = arxiv_id_from_doi("10.48550/arxiv." + value.split(":", 1)[1].strip())
+            if arxiv_id:
+                doi = f"10.48550/arxiv.{arxiv_id}"
+                path = "/works/" + quote(f"https://doi.org/{doi}", safe=":/")
+                payload = self._tracked_request(self._url(path, {"select": "id"}), "resolve_arxiv", calls)
+                resolved = _normalise_openalex_id(payload.get("id"))
+                if resolved and re.fullmatch(r"W\d+", resolved, flags=re.IGNORECASE):
+                    return resolved.upper()
+            raise ProviderError(self.source, "parse", f"arXiv lookup returned no valid OpenAlex work ID for {value[:48]}")
+
         doi = _normalise_doi(value)
         if not doi or not doi.startswith("10."):
-            raise ProviderError(self.source, "config", "paper_id must be an OpenAlex work ID or DOI")
+            raise ProviderError(self.source, "config", "paper_id must be an OpenAlex work ID, DOI or arXiv ID")
         path = "/works/" + quote(f"https://doi.org/{doi}", safe=":/")
         payload = self._tracked_request(self._url(path, {"select": "id"}), "resolve_doi", calls)
         resolved = _normalise_openalex_id(payload.get("id"))

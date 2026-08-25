@@ -36,13 +36,28 @@ def _merge_by_repr(left: list[Any], right: list[Any]) -> list[Any]:
 
 
 def _default_merge(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
-    """默认合并策略：保留先出现的文档本体，只合并 provenance 列表字段。"""
+    """默认合并策略：保留先出现的文档本体，合并 provenance 列表与标识字段。
+
+    identifiers 取并集（不覆盖已有值）：arXiv 副本带来 arxiv_id、OpenAlex
+    副本带来 openalex_id/DOI。合并后引用扩展与身份匹配两边都能用——否则
+    arXiv 首现的论文丢失 W-id，OpenAlex 引用接口无法扩展它。
+    """
 
     merged = deepcopy(base)
     for field in ("sources", "endpoints", "warnings", "pages"):
         merged["provenance"][field] = _merge_by_repr(
             merged["provenance"].get(field) or [], other["provenance"].get(field) or []
         )
+    merged_ids = merged.setdefault("identifiers", {})
+    for key, value in (other.get("identifiers") or {}).items():
+        if value and not merged_ids.get(key):
+            merged_ids[key] = deepcopy(value)
+    # 首现副本缺失摘要/作者时用另一份补齐（不按长度覆盖，保持"保留第一份"契约）。
+    for bib_field in ("abstract", "authors"):
+        base_value = (merged.get("bibliography") or {}).get(bib_field)
+        other_value = (other.get("bibliography") or {}).get(bib_field)
+        if other_value and not base_value:
+            merged.setdefault("bibliography", {})[bib_field] = deepcopy(other_value)
     return merged
 
 
