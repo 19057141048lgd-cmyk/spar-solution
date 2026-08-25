@@ -43,7 +43,7 @@ class P3PipelineTests(unittest.TestCase):
             self.assertEqual(run.rounds[0]["action"], "NEXT_QUERY")
             self.assertGreaterEqual(len(run.rounds), 2)
             replay = replay_p3(temp)
-            self.assertEqual(replay["final_selection"]["schema_version"], "spar.final.v1")
+            self.assertEqual(replay["final_selection"]["schema_version"], "spar.final.v2")
             self.assertEqual(replay["manifest"]["query_id"], run.query_plan["query_id"])
             self.assertTrue(all((Path(temp) / ref).read_text(encoding="utf-8").startswith(f"paper_id: {row['paper_id']}\n") for row in run.final_selection["results"] for ref in row["evidence_refs"]))
             self.assertEqual(run.final_selection["cost"]["provider_calls"], run.cost["provider_calls"])
@@ -81,7 +81,7 @@ class P3PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             run = P3Pipeline({"arxiv": provider}, citation_enabled=False, understanding_layer=layer).run("WiFi heart rate monitoring", output_dir=temp)
             self.assertEqual(layer.judge_calls, 1)
-            self.assertEqual(run.final_selection["schema_version"], "spar.final.v1")
+            self.assertEqual(run.final_selection["schema_version"], "spar.final.v2")
             self.assertIn("relation_graph", run.final_selection)
 
     def test_no_relevance_seed_does_not_expand_citations(self):

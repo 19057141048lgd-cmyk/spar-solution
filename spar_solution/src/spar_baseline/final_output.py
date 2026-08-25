@@ -1,4 +1,13 @@
-"""Build the submission-facing structured result from a P2 run."""
+"""Build the submission-facing structured result (spar.final.v2).
+
+v2 按公开测试集（PaSa 官方口径）校准交卷方式：
+- ``results`` 是**提交集合**：按 ``select_threshold`` 选出的论文（非固定
+  top-K），对应官方 document-level Precision/Recall/F1 的被测对象；
+- ``ranked_pool`` 是按分数排序的完整候选前 ``pool_k`` 篇，供官方
+  Recall@20/50/100 计分；
+- ``selection_rule`` 记录阈值与规则，可审计、可复现；
+- 分数基准兼容两种管线：P2 用 ``scores.final``，搜索树用 ``scores.relevance``。
+"""
 
 from __future__ import annotations
 
@@ -6,9 +15,13 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 
-FINAL_SCHEMA = "spar.final.v1"
+FINAL_SCHEMA = "spar.final.v2"
+LEGACY_SCHEMA = "spar.final.v1"
 COMPONENTS = ("relevance", "constraint", "evidence", "quality", "citation", "novelty")
 ZONES = {"high", "partial", "reserve"}
+DEFAULT_SELECT_THRESHOLD = 0.55
+DEFAULT_MAX_SELECTED = 30
+DEFAULT_POOL_K = 50
 
 
 def _payload(run: Mapping[str, Any] | Any) -> dict[str, Any]:
@@ -40,20 +53,52 @@ def _zone(score: float) -> str:
     return "reserve"
 
 
-def build_final_selection(run: Mapping[str, Any] | Any, *, top_k: int = 20) -> dict[str, Any]:
-    """Return ``spar.final.v1``; hard-excluded papers never enter results."""
+def _score_of(paper: Mapping[str, Any]) -> float | None:
+    """提交分数基准：优先 final（P2 管线），退 relevance（搜索树管线）。"""
 
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+    scores = paper.get("scores") or {}
+    for key in ("final", "relevance"):
+        value = scores.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def build_final_selection(
+    run: Mapping[str, Any] | Any,
+    *,
+    top_k: int | None = None,
+    select_threshold: float = DEFAULT_SELECT_THRESHOLD,
+    max_selected: int = DEFAULT_MAX_SELECTED,
+    pool_k: int = DEFAULT_POOL_K,
+) -> dict[str, Any]:
+    """返回 ``spar.final.v2`` 交付物。
+
+    默认按阈值选集合（官方口径）；传入 ``top_k`` 时退回旧 top-K 模式
+    （兼容历史调用），``selection_rule.mode`` 会如实记录。
+    """
+
+    if not 0 <= select_threshold <= 1:
+        raise ValueError("select_threshold must be between 0 and 1")
+    if max_selected < 1 or pool_k < 1:
+        raise ValueError("max_selected and pool_k must be positive")
+    if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1):
         raise ValueError("top_k must be a positive integer")
     payload = _payload(run)
     papers = _papers(payload)
     eligible = [
         paper for paper in papers
         if paper.get("status", {}).get("hard_constraints_pass") is not False
-        and isinstance(paper.get("scores", {}).get("final"), (int, float))
+        and _score_of(paper) is not None
     ]
-    eligible.sort(key=lambda item: (float(item["scores"]["final"]), str(item.get("paper_id") or "")), reverse=True)
-    selected = eligible[:top_k]
+    eligible.sort(key=lambda item: (_score_of(item) or 0.0, str(item.get("paper_id") or "")), reverse=True)
+    if top_k is not None:
+        selected = eligible[:top_k]
+        rule = {"mode": "legacy_top_k", "top_k": top_k, "basis": "final_or_relevance"}
+    else:
+        selected = [paper for paper in eligible if (_score_of(paper) or 0.0) >= select_threshold][:max_selected]
+        rule = {"mode": "threshold", "select_threshold": select_threshold, "max_selected": max_selected, "basis": "final_or_relevance"}
+
     verdicts = {
         str(item.get("paper_id")): item
         for item in payload.get("verdicts") or []
@@ -66,7 +111,7 @@ def build_final_selection(run: Mapping[str, Any] | Any, *, top_k: int = 20) -> d
         access = paper.get("access") or {}
         scores = paper.get("scores") or {}
         verdict = verdicts.get(str(paper["paper_id"]), {})
-        final_score = float(scores["final"])
+        score = _score_of(paper) or 0.0
         results.append({
             "rank": rank,
             "paper_id": str(paper["paper_id"]),
@@ -76,13 +121,22 @@ def build_final_selection(run: Mapping[str, Any] | Any, *, top_k: int = 20) -> d
             "doi": identifiers.get("doi"),
             "arxiv_id": identifiers.get("arxiv_id"),
             "landing_url": access.get("landing_url"),
-            "relevance_zone": _zone(final_score),
-            "final_score": final_score,
+            "relevance_zone": _zone(score),
+            "final_score": score,
             "component_scores": {name: scores.get(name) for name in COMPONENTS},
             "evidence_refs": list(paper.get("evidence_refs") or []),
             "reason_codes": list(verdict.get("reason_codes") or []),
             "llm_judgement": deepcopy(verdict.get("llm_judgement")) if isinstance(verdict.get("llm_judgement"), Mapping) else None,
         })
+    # 官方 Recall@K 计分用的排序池：收录全部未被判死的论文；未打分的
+    # （如末层引用捞回、LLM 预算耗尽未判）排在已打分之后——它们丢了会直接
+    # 吃掉 recall@K（hybrid-5 实测：test_47 的 3 篇 Gold 因此消失）。
+    pool_papers = [paper for paper in papers if paper.get("status", {}).get("hard_constraints_pass") is not False]
+    pool_papers.sort(key=lambda item: (_score_of(item) is not None, _score_of(item) or 0.0, str(item.get("paper_id") or "")), reverse=True)
+    ranked_pool = [
+        {"rank": rank, "paper_id": str(paper.get("paper_id") or ""), "title": str((paper.get("bibliography") or {}).get("title") or ""), "score": _score_of(paper)}
+        for rank, paper in enumerate(pool_papers[:pool_k], 1)
+    ]
 
     selected_ids = {item["paper_id"] for item in results}
     paper_by_id = {str(item.get("paper_id")): item for item in papers if item.get("paper_id")}
@@ -93,8 +147,8 @@ def build_final_selection(run: Mapping[str, Any] | Any, *, top_k: int = 20) -> d
         for raw in batch.get("edges") or []:
             if not isinstance(raw, Mapping):
                 continue
-            parent = str(raw.get("parent_paper_id") or "")
-            child = str(raw.get("child_paper_id") or "")
+            parent = str(raw.get("parent_paper_id") or raw.get("parent") or "")
+            child = str(raw.get("child_paper_id") or raw.get("child") or "")
             relation = str(raw.get("relation_type") or "related")
             if not parent or not child or not ({parent, child} & selected_ids):
                 continue
@@ -116,7 +170,7 @@ def build_final_selection(run: Mapping[str, Any] | Any, *, top_k: int = 20) -> d
         nodes.append({
             "paper_id": paper_id,
             "title": str((paper.get("bibliography") or {}).get("title") or ""),
-            "outside_topk": paper_id not in selected_ids,
+            "outside_selection": paper_id not in selected_ids,
         })
 
     manifest = payload.get("manifest") or payload.get("run_manifest") or {}
@@ -127,8 +181,16 @@ def build_final_selection(run: Mapping[str, Any] | Any, *, top_k: int = 20) -> d
         "query": str(payload.get("query") or (manifest.get("query") if isinstance(manifest, Mapping) else "") or ""),
         "query_id": str((payload.get("query_plan") or {}).get("query_id") or (manifest.get("query_id") if isinstance(manifest, Mapping) else "") or ""),
         "results": results,
+        "ranked_pool": ranked_pool,
+        "selection_rule": rule,
         "relation_graph": {"nodes": nodes, "edges": edges},
-        "summary": {"selected": len(results), "excluded": len(papers) - len(eligible), "zones": zones, "citation_edges": len(edges)},
+        "summary": {
+            "selected": len(results),
+            "pool_size": len(ranked_pool),
+            "excluded": len(papers) - len(eligible),
+            "zones": zones,
+            "citation_edges": len(edges),
+        },
         "degraded": bool((isinstance(manifest, Mapping) and manifest.get("status") == "degraded") or payload.get("errors")),
         "cost": deepcopy(dict(cost)) if isinstance(cost, Mapping) else {},
     }
@@ -136,8 +198,11 @@ def build_final_selection(run: Mapping[str, Any] | Any, *, top_k: int = 20) -> d
 
 
 def validate_final_selection(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or value.get("schema_version") != FINAL_SCHEMA:
-        raise ValueError(f"schema_version must be {FINAL_SCHEMA}")
+    if not isinstance(value, Mapping):
+        raise ValueError("final selection must be an object")
+    schema = value.get("schema_version")
+    if schema not in (FINAL_SCHEMA, LEGACY_SCHEMA):
+        raise ValueError(f"schema_version must be {FINAL_SCHEMA} or {LEGACY_SCHEMA}")
     if not isinstance(value.get("results"), list):
         raise ValueError("results must be an array")
     for rank, item in enumerate(value["results"], 1):
@@ -150,6 +215,22 @@ def validate_final_selection(value: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("final_score must be between 0 and 1")
         if set(item.get("component_scores") or {}) != set(COMPONENTS):
             raise ValueError("component_scores must contain all six components")
+    if schema == FINAL_SCHEMA:
+        if not isinstance(value.get("ranked_pool"), list) or not isinstance(value.get("selection_rule"), Mapping):
+            raise ValueError("v2 requires ranked_pool and selection_rule")
+        for rank, item in enumerate(value.get("ranked_pool") or [], 1):
+            if not isinstance(item, Mapping) or item.get("rank") != rank or not item.get("paper_id"):
+                raise ValueError("ranked_pool must have contiguous ranks and paper_id")
+        rule = value["selection_rule"]
+        mode = rule.get("mode")
+        if mode == "threshold":
+            if not 0 <= float(rule.get("select_threshold") or 0) <= 1 or int(rule.get("max_selected") or 0) < 1:
+                raise ValueError("invalid threshold selection rule")
+        elif mode == "legacy_top_k":
+            if int(rule.get("top_k") or 0) < 1:
+                raise ValueError("invalid legacy top_k rule")
+        else:
+            raise ValueError("invalid selection rule mode")
     graph = value.get("relation_graph")
     if not isinstance(graph, Mapping) or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
         raise ValueError("relation_graph must contain nodes and edges arrays")
@@ -158,4 +239,4 @@ def validate_final_selection(value: Mapping[str, Any]) -> dict[str, Any]:
     return deepcopy(dict(value))
 
 
-__all__ = ["FINAL_SCHEMA", "build_final_selection", "validate_final_selection"]
+__all__ = ["DEFAULT_MAX_SELECTED", "DEFAULT_POOL_K", "DEFAULT_SELECT_THRESHOLD", "FINAL_SCHEMA", "LEGACY_SCHEMA", "build_final_selection", "validate_final_selection"]

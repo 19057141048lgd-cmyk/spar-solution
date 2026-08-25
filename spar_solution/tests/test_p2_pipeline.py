@@ -67,7 +67,7 @@ class P2PipelineTests(unittest.TestCase):
             self.assertTrue(payload["verdicts"])
             self.assertTrue(payload["stop"])
             self.assertEqual(payload["run_manifest"]["schema_version"], "p2_run.v1")
-            self.assertEqual(payload["final_selection"]["schema_version"], "spar.final.v1")
+            self.assertEqual(payload["final_selection"]["schema_version"], "spar.final.v2")
             self.assertEqual(run.manifest["query_id"], payload["run_manifest"]["query_id"])
             self.assertEqual(run.manifest["iterations"], 2)
             self.assertEqual(len(payload["stop"]), 2)

@@ -27,7 +27,7 @@ class P2CliTests(unittest.TestCase):
             final_path.write_text('{"schema_version":"old"}', encoding="utf-8")
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["finalize", "--input", directory]), 0)
-            self.assertEqual(json.loads(final_path.read_text(encoding="utf-8"))["schema_version"], "spar.final.v1")
+            self.assertEqual(json.loads(final_path.read_text(encoding="utf-8"))["schema_version"], "spar.final.v2")
 
 
 if __name__ == "__main__":
