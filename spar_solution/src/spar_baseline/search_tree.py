@@ -338,6 +338,52 @@ class SearchTreeRunner:
             if text and _norm_query(text) not in searched_norm
         ][: self.queries_per_level]
 
+    def _judge_new_papers(
+        self,
+        pool: list[dict[str, Any]],
+        judged_ids: set[str],
+        judge_plan: Mapping[str, Any],
+        scoring_plan: Mapping[str, Any],
+        errors: list[dict[str, Any]],
+        stage: str,
+    ) -> list[str]:
+        """对池内未判分论文执行一轮判分，返回本轮达到相关阈值的 paper_id。
+
+        引用捞回的子论文（被正文点名）优先判分：它们的先验相关性高于普通
+        检索结果，LLM 预算紧张时必须先花在它们身上（hybrid-5 实测：末层
+        子论文没判到分，Gold 排位 27-33 卡在 recall@20 之外）。
+        无 LLM 或预算耗尽时全部退词法分——出池论文不允许 relevance=None。
+        """
+
+        to_judge = [paper for paper in pool if str(paper.get("paper_id")) not in judged_ids]
+        to_judge.sort(key=lambda paper: (int((paper.get("provenance") or {}).get("citation_depth") or 0) < 1,))
+        judgements: dict[str, Mapping[str, Any]] = {}
+        if self.understanding_layer is not None and to_judge and self._llm_budget_left():
+            unique: dict[str, dict[str, Any]] = {}
+            for paper in to_judge:
+                unique.setdefault(str(paper["paper_id"]), paper)
+            try:
+                results = self._call_llm(lambda: self.understanding_layer.judge(judge_plan, list(unique.values())))
+                judgements = {str(item.get("paper_id")): item for item in (results or []) if isinstance(item, Mapping)}
+            except _LLM_ERRORS as exc:
+                errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "judge_fallback")), "message": str(exc)[:200], "stage": stage})
+        new_relevant_ids: list[str] = []
+        for paper in to_judge:
+            paper_id = str(paper["paper_id"])
+            judged_ids.add(paper_id)
+            judgement = judgements.get(paper_id)
+            score: float
+            try:
+                score = float(judgement["relevance_score"]) if judgement is not None else float("nan")
+            except (KeyError, TypeError, ValueError):
+                score = float("nan")
+            if score != score:  # 无判断或畸形判断 → 词法分兜底
+                score = float(self.scorer.preliminary_relevance(paper, scoring_plan))
+            paper.setdefault("scores", {})["relevance"] = score
+            if score >= self.relevance_threshold:
+                new_relevant_ids.append(paper_id)
+        return new_relevant_ids
+
     # ------------------------------------------------------------------
     # 引用扩展
     # ------------------------------------------------------------------
@@ -563,36 +609,7 @@ class SearchTreeRunner:
                     )
 
             # -- 4. 判断：新增论文批量交给 understanding_layer.judge --
-            to_judge = [paper for paper in pool if str(paper.get("paper_id")) not in judged_ids]
-            # 引用捞回的子论文（被正文点名）优先判分：它们的先验相关性高于
-            # 普通检索结果，LLM 预算紧张时必须先花在它们身上（hybrid-5 实测：
-            # 末层子论文没判到分，Gold 排位 27-33 卡在 recall@20 之外）。
-            to_judge.sort(key=lambda paper: (int((paper.get("provenance") or {}).get("citation_depth") or 0) < 1,))
-            judgements: dict[str, Mapping[str, Any]] = {}
-            if self.understanding_layer is not None and to_judge and self._llm_budget_left():
-                unique: dict[str, dict[str, Any]] = {}
-                for paper in to_judge:
-                    unique.setdefault(str(paper["paper_id"]), paper)
-                try:
-                    results = self._call_llm(lambda: self.understanding_layer.judge(judge_plan, list(unique.values())))
-                    judgements = {str(item.get("paper_id")): item for item in (results or []) if isinstance(item, Mapping)}
-                except _LLM_ERRORS as exc:
-                    errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "judge_fallback")), "message": str(exc)[:200], "stage": f"judge_L{level}"})
-            new_relevant_ids: list[str] = []
-            for paper in to_judge:
-                paper_id = str(paper["paper_id"])
-                judged_ids.add(paper_id)
-                judgement = judgements.get(paper_id)
-                score: float
-                try:
-                    score = float(judgement["relevance_score"]) if judgement is not None else float("nan")
-                except (KeyError, TypeError, ValueError):
-                    score = float("nan")
-                if score != score:  # 无判断或畸形判断 → 词法分兜底
-                    score = float(self.scorer.preliminary_relevance(paper, scoring_plan))
-                paper.setdefault("scores", {})["relevance"] = score
-                if score >= self.relevance_threshold:
-                    new_relevant_ids.append(paper_id)
+            new_relevant_ids = self._judge_new_papers(pool, judged_ids, judge_plan, scoring_plan, errors, f"judge_L{level}")
 
             # -- 5. 引用扩展：高相关论文按分取前 docs_to_expand 篇 --
             candidates = [paper for paper in pool if _relevance_of(paper) >= self.relevance_threshold and str(paper.get("paper_id")) not in expanded_ids]
@@ -705,12 +722,23 @@ class SearchTreeRunner:
         else:
             stop_reason = STOP_MAX_DEPTH
 
+        # P0-1：末层（以及预算/无新增等提前 break 的层）引用扩展入池的子论文
+        # 在循环内永远等不到下一轮判断。循环结束后补判一轮：LLM 预算内优先、
+        # 引用子优先，无预算退词法分——出池论文不允许 relevance=None 沉底。
+        self._judge_new_papers(pool, judged_ids, judge_plan, scoring_plan, errors, "judge_final")
+
         papers = sorted(pool, key=lambda paper: (-_relevance_of(paper), str(paper.get("paper_id"))))
+        usage = getattr(client, "usage", None) if client is not None else None
+        usage = usage if isinstance(usage, Mapping) else {}
         stats = {
             "provider_calls": provider_calls,
             "search_calls": search_calls,
             "relation_calls": relation_calls,
             "llm_calls": self._llm_calls,
+            "llm_failures": int(usage.get("failures", 0) or 0),
+            "llm_prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "llm_completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+            "llm_total_tokens": int(usage.get("total_tokens", 0) or 0),
             "levels": len(nodes),
             "papers": len(papers),
             "edges": len(edges),

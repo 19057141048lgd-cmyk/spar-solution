@@ -352,3 +352,84 @@ class RecallPackageTests(unittest.TestCase):
         self.assertTrue(queries, "规则兜底应返回可检索查询")
         self.assertTrue(all(_sanitize_query(q) for q in queries))
         self.assertEqual([q for q in queries], [q for q in _plan_queries(plan, runner.queries_per_level)] if set() == set() else queries)
+
+
+def _grandchild(paper_id="fixture:grandchild", doi="10.1234/tree.grandchild"):
+    return _fixture_paper(
+        paper_id,
+        doi,
+        "WiFi CSI heart rate follow-up measurement",
+        "Follow-up work on WiFi CSI heart rate monitoring measurement and contactless vital sign estimation.",
+    )
+
+
+class FinalJudgePassTests(unittest.TestCase):
+    """P0-1：末层引用扩展入池的子论文必须在出池前拿到判分（LLM 或词法）。"""
+
+    @staticmethod
+    def _provider():
+        seed = _seed()
+        child = _child()
+        grandchild = _grandchild()
+        return QueryAwareFixtureProvider(
+            "arxiv",
+            [seed],
+            query_records={"deep learning": [_fixture_paper(
+                "fixture:level1",
+                "10.1234/tree.level1",
+                "Deep learning CSI vital signs",
+                "Deep learning models for CSI based vital sign estimation and heart rate monitoring.",
+            )]},
+            relations={seed["paper_id"]: [child], child["paper_id"]: [grandchild]},
+        )
+
+    def test_final_level_children_get_llm_judgement(self):
+        transport = FakeTaskTransport(
+            plan_queries=["wifi csi heart rate monitoring", "contactless vital signs monitoring"],
+            generated_queries=["CSI vital sign deep learning estimation"],
+        )
+        result = SearchTreeRunner({"arxiv": self._provider()}, _scripted_layer(transport)).run(QUERY)
+        papers = {paper["paper_id"]: paper for paper in result["papers"]}
+        self.assertIn("fixture:grandchild", papers)
+        # 末层子论文由循环后的补判轮拿到 LLM 分，而不是 relevance=None 沉底。
+        self.assertAlmostEqual(papers["fixture:grandchild"]["scores"]["relevance"], 0.9)
+        self.assertTrue(all(paper["scores"].get("relevance") is not None for paper in result["papers"]))
+        # plan + L0 judge + generate + L1 judge + final judge = 5 次 LLM 调用。
+        self.assertEqual(
+            transport.calls,
+            ["decompose_query", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates"],
+        )
+        self.assertEqual(result["stats"]["llm_calls"], 5)
+
+    def test_final_level_children_lexical_fallback_without_llm(self):
+        result = SearchTreeRunner({"arxiv": self._provider()}, max_depth=2).run(QUERY)
+        papers = {paper["paper_id"]: paper for paper in result["papers"]}
+        self.assertIn("fixture:grandchild", papers)
+        score = papers["fixture:grandchild"]["scores"]["relevance"]
+        self.assertIsNotNone(score)
+        self.assertIsInstance(score, float)
+        self.assertGreaterEqual(score, 0.0)
+        self.assertTrue(all(paper["scores"].get("relevance") is not None for paper in result["papers"]))
+
+
+class LlmTokenStatsTests(unittest.TestCase):
+    """P0-2：tree 路径把 LLM client 的 usage 累计写进 stats。"""
+
+    def test_stats_include_llm_token_usage(self):
+        class StubClient:
+            usage = {"calls": 3, "failures": 1, "prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500, "latency_ms": 1.0}
+
+        class StubLayer:
+            def __init__(self):
+                self.client = StubClient()
+
+            def judge(self, plan, papers):
+                return []
+
+        provider = FixtureProvider("arxiv", [_seed()], {_seed()["paper_id"]: [_child()]})
+        result = SearchTreeRunner({"arxiv": provider}, StubLayer(), max_depth=1).run(QUERY)
+        stats = result["stats"]
+        self.assertEqual(stats["llm_prompt_tokens"], 1200)
+        self.assertEqual(stats["llm_completion_tokens"], 300)
+        self.assertEqual(stats["llm_total_tokens"], 1500)
+        self.assertEqual(stats["llm_failures"], 1)
