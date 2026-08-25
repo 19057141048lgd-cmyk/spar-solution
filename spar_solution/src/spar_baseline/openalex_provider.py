@@ -177,7 +177,12 @@ def _default_transport(method: str, url: str, headers: Mapping[str, str], timeou
 # 根因是 4 线程并发 + 无间隔连发。礼貌池 + 最小间隔 + 429 退避重试。
 _OPENALEX_THROTTLE_LOCK = threading.Lock()
 _OPENALEX_LAST_CALL = 0.0
+_OPENALEX_CONSECUTIVE_429 = 0
+_OPENALEX_COOLDOWN_UNTIL = 0.0
 OPENALEX_MIN_INTERVAL = 1.0  # 秒；测试可 monkeypatch
+OPENALEX_RATE_BACKOFFS = (3.0, 8.0, 20.0)  # 429 退避阶梯
+OPENALEX_CIRCUIT_THRESHOLD = 3  # 连续被拒次数→熔断
+OPENALEX_CIRCUIT_COOLDOWN = 60.0  # 熔断冷却秒数
 
 
 class OpenAlexProvider:
@@ -229,8 +234,15 @@ class OpenAlexProvider:
         transport = self.transport
         if not callable(transport):
             raise ProviderError(self.source, "config", "transport must be callable")
+        global _OPENALEX_CONSECUTIVE_429, _OPENALEX_COOLDOWN_UNTIL
         for attempt in range(3):
             with _OPENALEX_THROTTLE_LOCK:
+                # 熔断：持续轰击下礼貌池也会渐进限流（sentinel-new5 实测
+                # 连续三轮后每题 11-15 次 429）。连续被拒→冷却一分钟再试，
+                # 比反复退避更省时间也更礼貌。
+                cooldown_wait = _OPENALEX_COOLDOWN_UNTIL - monotonic()
+                if cooldown_wait > 0:
+                    sleep(cooldown_wait)
                 wait = OPENALEX_MIN_INTERVAL - (monotonic() - _OPENALEX_LAST_CALL)
                 if wait > 0:
                     sleep(wait)
@@ -256,10 +268,14 @@ class OpenAlexProvider:
                 except Exception as exc:
                     raise ProviderError(self.source, "network", f"transport failed: {type(exc).__name__}") from exc
             if response is not None and response.status != 429:
+                _OPENALEX_CONSECUTIVE_429 = 0
                 return response
-            # 429 退避重试：限流窗口短，等待后重试比直接失败更划算。
+            _OPENALEX_CONSECUTIVE_429 += 1
+            if _OPENALEX_CONSECUTIVE_429 >= OPENALEX_CIRCUIT_THRESHOLD:
+                _OPENALEX_COOLDOWN_UNTIL = monotonic() + OPENALEX_CIRCUIT_COOLDOWN
+                _OPENALEX_CONSECUTIVE_429 = 0
             if attempt < 2:
-                sleep(2.0 * (attempt + 1))
+                sleep(OPENALEX_RATE_BACKOFFS[attempt])
         raise ProviderError(self.source, "rate", "HTTP status 429 after retries", status_code=429, retryable=True)
 
     def _request_json(self, url: str) -> tuple[Mapping[str, Any], float]:
