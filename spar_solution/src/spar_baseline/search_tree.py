@@ -30,7 +30,6 @@ from .paperdoc import validate_paper_doc
 from .query_planner import QueryPlanner, _clean_query
 from .question_understanding import (
     DRAFT_SYSTEM_PROMPT,
-    REFLECT_SYSTEM_PROMPT,
     collect_search_queries,
     parse_understanding,
 )
@@ -306,10 +305,7 @@ class SearchTreeRunner:
     # ------------------------------------------------------------------
 
     def _understand_queries(self, query: str, errors: list[dict[str, Any]]) -> list[str]:
-        """搜之前先读题：起草理解 → 自我质疑 → 才出搜索词。
-
-        综述定位词排在前面。失败返回 []，调用方仍用原计划查询。
-        """
+        """搜之前先读题，按第一遍理解出搜索词。失败返回 []，仍用原计划查询。"""
 
         layer = self.understanding_layer
         client = getattr(layer, "client", None)
@@ -322,20 +318,6 @@ class SearchTreeRunner:
             errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "understand_fallback")), "message": str(exc)[:200], "stage": "understand_L0"})
             return []
         parsed = parse_understanding(draft_raw if isinstance(draft_raw, Mapping) else {}, query)
-        if self._llm_budget_left():
-            reflect_user = json.dumps(
-                {"task": "reflect_understanding", "query": query, "draft": parsed},
-                ensure_ascii=False,
-            )
-            try:
-                revised_raw = self._call_llm(lambda: client.complete_json(REFLECT_SYSTEM_PROMPT, reflect_user, max_tokens=800))
-                parsed = parse_understanding(
-                    revised_raw if isinstance(revised_raw, Mapping) else {},
-                    query,
-                    fallback=parsed,
-                )
-            except _LLM_ERRORS as exc:
-                errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "reflect_fallback")), "message": str(exc)[:200], "stage": "reflect_L0"})
         self._last_understanding = parsed
         return collect_search_queries(parsed)
 

@@ -1,4 +1,4 @@
-"""读题：先理解、再自我质疑，然后才允许出搜索词。
+"""读题：先理解题目，再出搜索词。
 
 这一层不搜论文、不发明论文事实。失败时返回空理解，调用方退回原查询计划。
 """
@@ -22,16 +22,6 @@ DRAFT_SYSTEM_PROMPT = (
     "keywords (string[]), queries (3-5 short keyword searches, not a copy of the question), "
     "survey_queries (1-2 survey/review searches), confidence (0-1)."
 )
-
-REFLECT_SYSTEM_PROMPT = (
-    "You are a skeptical colleague. The draft understanding below may be wrong because it read the question too literally. "
-    "Ask: (1) could these words belong to a different field? (2) would answering papers use these exact words, "
-    "or is this survey jargon? (3) which field's surveys would list this as a method family? "
-    "If unsure, keep queries for more than one field and keep the survey-finding queries. "
-    "Revise the same JSON. Add doubts (string[], what you questioned) and revised (boolean). "
-    "Do not invent paper titles."
-)
-
 
 def _string_list(value: Any, *, limit: int = 8) -> list[str]:
     if isinstance(value, str) and value.strip():
@@ -75,7 +65,6 @@ def parse_understanding(payload: Mapping[str, Any] | None, query: str, *, fallba
     survey_queries = _string_list(raw.get("survey_queries"), limit=4) or _string_list(base.get("survey_queries"), limit=4)
     alt_fields = _string_list(raw.get("alt_fields")) or _string_list(base.get("alt_fields"))
     keywords = _string_list(raw.get("keywords")) or _string_list(base.get("keywords"))
-    doubts = _string_list(raw.get("doubts"), limit=6)
     jargon = raw.get("jargon_from_survey")
     if not isinstance(jargon, bool):
         jargon = bool(base.get("jargon_from_survey") or family_name)
@@ -91,8 +80,6 @@ def parse_understanding(payload: Mapping[str, Any] | None, query: str, *, fallba
         "queries": queries,
         "survey_queries": survey_queries,
         "confidence": _bounded_confidence(raw.get("confidence", base.get("confidence", 0.5))),
-        "doubts": doubts,
-        "revised": bool(raw.get("revised")),
         "source": "llm",
     }
 
@@ -118,7 +105,6 @@ def collect_search_queries(understanding: Mapping[str, Any] | None, *, limit: in
 
 __all__ = [
     "DRAFT_SYSTEM_PROMPT",
-    "REFLECT_SYSTEM_PROMPT",
     "UNDERSTANDING_SCHEMA",
     "collect_search_queries",
     "parse_understanding",

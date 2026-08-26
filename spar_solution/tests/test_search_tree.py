@@ -68,7 +68,7 @@ class FakeTaskTransport:
         self.calls.append(task)
         if task == "decompose_query":
             content = {"queries": list(self.plan_queries), "source_capabilities": ["arxiv"]}
-        elif task in {"understand_question", "reflect_understanding"}:
+        elif task == "understand_question":
             content = dict(self.understanding) if self.understanding else {
                 "field": "",
                 "queries": [{"query_text": item} for item in self.disambiguate],
@@ -175,13 +175,13 @@ class SearchTreeRunnerTests(unittest.TestCase):
         self.assertEqual(papers[seed["paper_id"]]["provenance"]["search_node"]["level"], 0)
         self.assertEqual(papers[seed["paper_id"]]["provenance"]["search_node"]["query"], "wifi csi heart rate monitoring")
         self.assertTrue(all(paper["provenance"].get("search_node") is not None for paper in result["papers"]))
-        # 成本：2 次检索 + 1 次引用（L0）+ 1 次检索 + 2 次引用（L1）；7 次 LLM
-        # （plan + 读题 + 质疑 + 两轮判断 + 深层查询生成 + 终局重排；读题未
+        # 成本：2 次检索 + 1 次引用（L0）+ 1 次检索 + 2 次引用（L1）；6 次 LLM
+        # （plan + 读题 + 两轮判断 + 深层查询生成 + 终局重排；读题未
         # 脚本化时返回空查询，L0 仍用计划查询）。
         self.assertEqual(result["stats"]["provider_calls"], 6)
-        self.assertEqual(result["stats"]["llm_calls"], 7)
+        self.assertEqual(result["stats"]["llm_calls"], 6)
         self.assertEqual(result["stats"]["planner_source"], "llm")
-        self.assertEqual(transport.calls, ["decompose_query", "understand_question", "reflect_understanding", "judge_candidates", "generate_queries", "judge_candidates", "rerank_top"])
+        self.assertEqual(transport.calls, ["decompose_query", "understand_question", "judge_candidates", "generate_queries", "judge_candidates", "rerank_top"])
 
     def test_rules_fallback_without_llm(self):
         seed = _seed()
@@ -412,12 +412,12 @@ class FinalJudgePassTests(unittest.TestCase):
         # 末层子论文由循环后的补判轮拿到 LLM 分，而不是 relevance=None 沉底。
         self.assertAlmostEqual(papers["fixture:grandchild"]["scores"]["relevance"], 0.9)
         self.assertTrue(all(paper["scores"].get("relevance") is not None for paper in result["papers"]))
-        # plan + 读题 + 质疑 + L0 judge + generate + L1 judge + final judge + rerank = 8 次 LLM 调用。
+        # plan + 读题 + L0 judge + generate + L1 judge + final judge + rerank = 7 次 LLM 调用。
         self.assertEqual(
             transport.calls,
-            ["decompose_query", "understand_question", "reflect_understanding", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates", "rerank_top"],
+            ["decompose_query", "understand_question", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates", "rerank_top"],
         )
-        self.assertEqual(result["stats"]["llm_calls"], 8)
+        self.assertEqual(result["stats"]["llm_calls"], 7)
 
     def test_final_level_children_lexical_fallback_without_llm(self):
         result = SearchTreeRunner({"arxiv": self._provider()}, max_depth=2).run(QUERY)
@@ -520,7 +520,6 @@ class UnderstandQueriesTests(unittest.TestCase):
             ["wifi sensing survey", "reconstruction error anomaly detection", "contactless csi vital signs", "wifi csi heart rate monitoring"],
         )
         self.assertIn("understand_question", transport.calls)
-        self.assertIn("reflect_understanding", transport.calls)
         self.assertEqual(result["understanding"]["field"], "wifi sensing")
 
     def test_understanding_failure_falls_back_to_plan_queries(self):

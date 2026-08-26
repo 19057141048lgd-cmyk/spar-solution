@@ -22,7 +22,6 @@ from src.spar_baseline.p2_cli import build_live_pipeline
 from src.spar_baseline.pasa_metrics import keep_letters
 from src.spar_baseline.question_understanding import (
     DRAFT_SYSTEM_PROMPT,
-    REFLECT_SYSTEM_PROMPT,
     collect_search_queries,
     parse_understanding,
 )
@@ -61,13 +60,7 @@ def main() -> int:
 
     started = time.perf_counter()
     draft = client.complete_json(DRAFT_SYSTEM_PROMPT, json.dumps({"task": "understand_question", "query": question}, ensure_ascii=False), max_tokens=800)
-    parsed = parse_understanding(draft, question)
-    revised = client.complete_json(
-        REFLECT_SYSTEM_PROMPT,
-        json.dumps({"task": "reflect_understanding", "query": question, "draft": parsed}, ensure_ascii=False),
-        max_tokens=800,
-    )
-    understanding = parse_understanding(revised, question, fallback=parsed)
+    understanding = parse_understanding(draft, question)
     queries = [_sanitize_query(text) for text in collect_search_queries(understanding)]
     queries = [text for text in queries if text and len(text.split()) >= 2]
 
@@ -77,7 +70,6 @@ def main() -> int:
     print(f"备选: {understanding.get('alt_fields')}")
     print(f"像综述黑话: {understanding.get('jargon_from_survey')}")
     print(f"答案大概长什么样: {understanding.get('answer_looks_like')}")
-    print(f"质疑: {understanding.get('doubts')}")
     print(f"搜索词: {queries}")
 
     gold_hits = []

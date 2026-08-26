@@ -24,14 +24,6 @@ class ParseUnderstandingTests(unittest.TestCase):
         self.assertEqual(parsed["field"], "")
         self.assertEqual(collect_search_queries(parsed), [])
 
-    def test_reflect_keeps_draft_when_revision_omits_queries(self):
-        draft = parse_understanding({"field": "wifi sensing", "queries": ["wifi csi heart rate"]}, "wifi")
-        revised = parse_understanding({"doubts": ["maybe radar instead"], "revised": True}, "wifi", fallback=draft)
-        self.assertEqual(revised["field"], "wifi sensing")
-        self.assertEqual(revised["queries"], ["wifi csi heart rate"])
-        self.assertEqual(revised["doubts"], ["maybe radar instead"])
-        self.assertTrue(revised["revised"])
-
     def test_accepts_query_objects(self):
         parsed = parse_understanding(
             {"queries": [{"query_text": "graph attention anomaly detection"}], "survey_queries": [{"query": "anomaly detection survey"}]},
