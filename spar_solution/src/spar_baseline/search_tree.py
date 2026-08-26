@@ -28,6 +28,12 @@ from .p2_recall import RecallRunner, SourceRouter
 from .p2_scoring import Scorer
 from .paperdoc import validate_paper_doc
 from .query_planner import QueryPlanner, _clean_query
+from .question_understanding import (
+    DRAFT_SYSTEM_PROMPT,
+    REFLECT_SYSTEM_PROMPT,
+    collect_search_queries,
+    parse_understanding,
+)
 from .rank_fusion import rrf_fuse
 
 
@@ -37,23 +43,7 @@ _QUESTION_SHELL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 领域消歧系统提示（命中率优先：宁可多搜几个领域的门，也不能照字面进错街区）。
-# v2（2026-08-25 test_0 实测复盘）：v1 只给常规领域解读（3D 重建/压缩感知/
-# 生成模型），漏掉了"reconstruction-based"作为方法族名称的领域——异常检测
-# 综述里就是这么分类方法的。v2 要求显式考虑方法族命名 + 综述定位查询。
-_DISAMBIGUATE_SYSTEM_PROMPT = (
-    "You are an academic search strategist. The question's wording often does not match the "
-    "terminology of the research field it came from: words like 'reconstruction', 'hybrid', "
-    "'calibration', 'alignment' mean different things in different fields. "
-    "Infer 3-6 DISTINCT readings of the question. Two kinds count: (a) different research "
-    "fields it could belong to; (b) METHOD-FAMILY readings — phrases like 'reconstruction-based', "
-    "'contrastive', 'generative', 'self-supervised' are family names used inside specific fields' "
-    "survey taxonomies (ask yourself: which field's surveys classify methods under this exact "
-    "family name?). For each reading write ONE short keyword query in that field's own terminology. "
-    "If a reading has a well-known survey covering it, include one survey-finding query "
-    "(e.g. '... survey'). Return JSON only: {\"fields\": [{\"field\": \"...\", \"query\": \"...\"}]}. "
-    "Never invent paper facts."
-)
+
 
 
 def _sanitize_query(text: str) -> str:
@@ -315,42 +305,39 @@ class SearchTreeRunner:
     # 查询生成
     # ------------------------------------------------------------------
 
-    def _disambiguate_queries(self, query: str, errors: list[dict[str, Any]]) -> list[str]:
-        """L0 前置领域消歧：按问题可能属于的 2-4 个领域各出一条领域术语查询。
+    def _understand_queries(self, query: str, errors: list[dict[str, Any]]) -> list[str]:
+        """搜之前先读题：起草理解 → 自我质疑 → 才出搜索词。
 
-        问题用词常与出处领域的术语不一致（AutoScholarQuery_test_0 全程跑偏
-        的根因："reconstruction-based"在异常检测=自编码重构误差，在 3D 视觉
-        =三维重建，在信号处理=信号重构——照字面搜索会进错街区且高分错域
-        论文把引用扩展也带偏）。领域查询置于照抄问题的计划查询之前；失败
-        返回 []，调用方保持原行为。消耗 1 次 LLM 调用，不占 provider 预算。
+        综述定位词排在前面。失败返回 []，调用方仍用原计划查询。
         """
 
         layer = self.understanding_layer
         client = getattr(layer, "client", None)
         if layer is None or not self._llm_budget_left() or not callable(getattr(client, "complete_json", None)):
             return []
-        user = json.dumps(
-            {
-                "task": "disambiguate_queries",
-                "query": query,
-                "required": {"fields": "2-4 objects, each with a field name and one short keyword query in that field's own terminology"},
-            },
-            ensure_ascii=False,
-        )
+        user = json.dumps({"task": "understand_question", "query": query}, ensure_ascii=False)
         try:
-            payload = self._call_llm(lambda: client.complete_json(_DISAMBIGUATE_SYSTEM_PROMPT, user, max_tokens=500))
+            draft_raw = self._call_llm(lambda: client.complete_json(DRAFT_SYSTEM_PROMPT, user, max_tokens=800))
         except _LLM_ERRORS as exc:
-            errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "disambiguate_fallback")), "message": str(exc)[:200], "stage": "disambiguate_L0"})
+            errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "understand_fallback")), "message": str(exc)[:200], "stage": "understand_L0"})
             return []
-        output: list[str] = []
-        values = payload.get("fields")
-        if isinstance(values, list):
-            for item in values[:6]:
-                if isinstance(item, Mapping):
-                    text = str(item.get("query") or "").strip()
-                    if text:
-                        output.append(text)
-        return output[:6]
+        parsed = parse_understanding(draft_raw if isinstance(draft_raw, Mapping) else {}, query)
+        if self._llm_budget_left():
+            reflect_user = json.dumps(
+                {"task": "reflect_understanding", "query": query, "draft": parsed},
+                ensure_ascii=False,
+            )
+            try:
+                revised_raw = self._call_llm(lambda: client.complete_json(REFLECT_SYSTEM_PROMPT, reflect_user, max_tokens=800))
+                parsed = parse_understanding(
+                    revised_raw if isinstance(revised_raw, Mapping) else {},
+                    query,
+                    fallback=parsed,
+                )
+            except _LLM_ERRORS as exc:
+                errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "reflect_fallback")), "message": str(exc)[:200], "stage": "reflect_L0"})
+        self._last_understanding = parsed
+        return collect_search_queries(parsed)
 
     def _rephrase_queries(
         self,
@@ -808,6 +795,7 @@ class SearchTreeRunner:
         search_calls = 0
         relation_calls = 0
         used_disambiguation = False
+        self._last_understanding: dict[str, Any] | None = None
 
         # 让真实 DeepSeek 客户端同步执行 LLM 硬顶（内部重试也不会超支）。
         client = getattr(self.understanding_layer, "client", None) if self.understanding_layer is not None else None
@@ -844,12 +832,11 @@ class SearchTreeRunner:
                 level_queries = texts
         if not level_queries:
             level_queries = _plan_queries(base_plan, self.queries_per_level) or [query.strip()]
-        # 领域消歧查询置前（命中率优先）：按各领域自己的术语出词，优先于
-        # 照抄问题的计划查询；消歧失败/无 LLM 时行为不变。
-        disambiguated = self._disambiguate_queries(query, errors)
-        if disambiguated:
+        # 读题+质疑后的搜索词置前（综述定位词在前）；失败则仍用计划查询。
+        understood = self._understand_queries(query, errors)
+        if understood:
             used_disambiguation = True
-            level_queries = list(dict.fromkeys([*disambiguated, *level_queries]))
+            level_queries = list(dict.fromkeys([*understood, *level_queries]))
         # 任何来源的第 0 层查询（LLM 回显问句/规则兜底）都必须先净化；
         # 单词垃圾查询（规则兜底曾产出 "models"）直接丢弃。
         level_queries = [q for q in dict.fromkeys(_sanitize_query(t) for t in level_queries if _sanitize_query(t)) if len(q.split()) >= 2]
@@ -1116,6 +1103,7 @@ class SearchTreeRunner:
             "stats": stats,
             "stop_reason": stop_reason,
             "errors": errors,
+            "understanding": self._last_understanding,
         }
 
 
