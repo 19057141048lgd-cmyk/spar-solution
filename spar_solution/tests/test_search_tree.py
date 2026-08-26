@@ -74,6 +74,8 @@ class FakeTaskTransport:
                 "queries": [{"query_text": item} for item in self.disambiguate],
                 "survey_queries": [],
             }
+        elif task == "reflect_on_pool":
+            content = {"verdict": "on_track", "why": "fixture", "queries": [], "survey_queries": []}
         elif task == "disambiguate_queries":
             content = {"fields": [{"field": "fixture field", "query": item} for item in self.disambiguate]}
         elif task == "generate_queries":
@@ -179,9 +181,9 @@ class SearchTreeRunnerTests(unittest.TestCase):
         # （plan + 读题 + 两轮判断 + 深层查询生成 + 终局重排；读题未
         # 脚本化时返回空查询，L0 仍用计划查询）。
         self.assertEqual(result["stats"]["provider_calls"], 6)
-        self.assertEqual(result["stats"]["llm_calls"], 6)
+        self.assertEqual(result["stats"]["llm_calls"], 7)
         self.assertEqual(result["stats"]["planner_source"], "llm")
-        self.assertEqual(transport.calls, ["decompose_query", "understand_question", "judge_candidates", "generate_queries", "judge_candidates", "rerank_top"])
+        self.assertEqual(transport.calls, ["decompose_query", "understand_question", "judge_candidates", "reflect_on_pool", "generate_queries", "judge_candidates", "rerank_top"])
 
     def test_rules_fallback_without_llm(self):
         seed = _seed()
@@ -415,9 +417,9 @@ class FinalJudgePassTests(unittest.TestCase):
         # plan + 读题 + L0 judge + generate + L1 judge + final judge + rerank = 7 次 LLM 调用。
         self.assertEqual(
             transport.calls,
-            ["decompose_query", "understand_question", "judge_candidates", "generate_queries", "judge_candidates", "judge_candidates", "rerank_top"],
+            ["decompose_query", "understand_question", "judge_candidates", "reflect_on_pool", "generate_queries", "judge_candidates", "judge_candidates", "rerank_top"],
         )
-        self.assertEqual(result["stats"]["llm_calls"], 7)
+        self.assertEqual(result["stats"]["llm_calls"], 8)
 
     def test_final_level_children_lexical_fallback_without_llm(self):
         result = SearchTreeRunner({"arxiv": self._provider()}, max_depth=2).run(QUERY)
@@ -528,6 +530,33 @@ class UnderstandQueriesTests(unittest.TestCase):
         result = SearchTreeRunner({"arxiv": provider}, _scripted_layer(transport), max_depth=1).run(QUERY)
         self.assertEqual(result["nodes"][0]["queries"], ["wifi csi heart rate monitoring"])
         self.assertIn("understand_question", transport.calls)
+
+    def test_wrong_street_skips_citation_expand(self):
+        class WrongStreetTransport(FakeTaskTransport):
+            def __call__(self, method, url, headers, body, timeout):
+                request = json.loads(body)
+                user = json.loads(request["messages"][1]["content"])
+                if user.get("task") == "reflect_on_pool":
+                    self.calls.append("reflect_on_pool")
+                    content = {
+                        "verdict": "wrong_street",
+                        "why": "cluster is a different reading",
+                        "field": "other field",
+                        "queries": ["other field survey"],
+                        "survey_queries": [],
+                    }
+                    envelope = {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+                    return TransportResponse(200, json.dumps(envelope))
+                return super().__call__(method, url, headers, body, timeout)
+
+        seed = _survey()
+        provider = RelationCountingProvider("arxiv", [seed], {seed["paper_id"]: [_child()]})
+        SearchTreeRunner(
+            {"arxiv": provider},
+            _scripted_layer(WrongStreetTransport(plan_queries=["wifi csi heart rate monitoring"], generated_queries=[])),
+            max_depth=1,
+        ).run(QUERY)
+        self.assertEqual(provider.relation_targets, [])
 
     def test_no_llm_means_no_understand_call(self):
         provider = FixtureProvider("arxiv", [_seed()], {_seed()["paper_id"]: [_child()]})

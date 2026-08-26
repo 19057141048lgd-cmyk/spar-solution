@@ -28,6 +28,7 @@ from .p2_recall import RecallRunner, SourceRouter
 from .p2_scoring import Scorer
 from .paperdoc import validate_paper_doc
 from .query_planner import QueryPlanner, _clean_query
+from .pool_reflect import reflect_on_pool
 from .question_understanding import (
     DRAFT_SYSTEM_PROMPT,
     collect_search_queries,
@@ -320,6 +321,17 @@ class SearchTreeRunner:
         parsed = parse_understanding(draft_raw if isinstance(draft_raw, Mapping) else {}, query)
         self._last_understanding = parsed
         return collect_search_queries(parsed)
+
+    def _reflect_on_pool(self, query: str, pool: list[dict[str, Any]], errors: list[dict[str, Any]]) -> dict[str, Any]:
+        layer = self.understanding_layer
+        client = getattr(layer, "client", None)
+        if layer is None or not callable(getattr(client, "complete_json", None)):
+            return {"verdict": "on_track", "why": "no_llm", "field": "", "queries": []}
+        try:
+            return self._call_llm(lambda: reflect_on_pool(client, query, self._last_understanding, pool))
+        except _LLM_ERRORS as exc:
+            errors.append({"source": "search_tree", "code": str(getattr(exc, "code", "reflect_pool_fallback")), "message": str(exc)[:200], "stage": "reflect_pool"})
+            return {"verdict": "on_track", "why": "reflect_failed", "field": "", "queries": []}
 
     def _rephrase_queries(
         self,
@@ -778,6 +790,7 @@ class SearchTreeRunner:
         relation_calls = 0
         used_disambiguation = False
         self._last_understanding: dict[str, Any] | None = None
+        self._course_correction_queries: list[str] = []
 
         # 让真实 DeepSeek 客户端同步执行 LLM 硬顶（内部重试也不会超支）。
         client = getattr(self.understanding_layer, "client", None) if self.understanding_layer is not None else None
@@ -856,6 +869,9 @@ class SearchTreeRunner:
                     uncovered = self._uncovered_reading_queries(query, searched_norm, junk_titles, errors, level)
                     if uncovered:
                         level_queries = list(dict.fromkeys([*uncovered, *level_queries]))
+                if self._course_correction_queries:
+                    level_queries = list(dict.fromkeys([*self._course_correction_queries, *level_queries]))
+                    self._course_correction_queries = []
                 level_queries = [_sanitize_query(text) for text in level_queries]
             level_queries = [
                 text
@@ -907,12 +923,21 @@ class SearchTreeRunner:
             # -- 4. 判断：新增论文批量交给 understanding_layer.judge --
             new_relevant_ids = self._judge_new_papers(pool, judged_ids, judge_plan, scoring_plan, errors, f"judge_L{level}")
 
+            # -- 4b. 对照原题看整池：对不上就换街，禁止顺着错簇扩引用。
+            skip_expand = False
+            if level == 0 and self._llm_budget_left():
+                course = self._reflect_on_pool(query, pool, errors)
+                if course.get("verdict") == "wrong_street":
+                    skip_expand = True
+                    self._course_correction_queries = list(course.get("queries") or [])
+
             # -- 5. 引用扩展：高相关论文按分取前 docs_to_expand 篇 --
-            candidates = [paper for paper in pool if _seed_relevance(paper) >= self.relevance_threshold and str(paper.get("paper_id")) not in expanded_ids]
+            candidates = [] if skip_expand else [paper for paper in pool if _seed_relevance(paper) >= self.relevance_threshold and str(paper.get("paper_id")) not in expanded_ids]
             # 综述优先当扩展种子：综述的参考文献是金标聚集地（题目黑话的
             # 出处），同等资格下综述排最前；分数稍低的综述也值得读。
-            candidates.sort(key=lambda paper: (not _is_survey(paper), -_seed_relevance(paper), str(paper.get("paper_id"))))
-            if not candidates:
+            if not skip_expand:
+                candidates.sort(key=lambda paper: (not _is_survey(paper), -_seed_relevance(paper), str(paper.get("paper_id"))))
+            if not skip_expand and not candidates:
                 # 兜底种子：没有 >=0.75 的论文时，只要池子大体在题（最高分
                 # >=0.3）且有摘要，就取融合分 top-3 扩引用，避免引用链饿死；
                 # 最高分连 0.3 都不到说明池子整体错领域，不浪费调用。
@@ -928,21 +953,22 @@ class SearchTreeRunner:
             # 综述保底名额与判分解耦：不问 LLM 分，按题面词重叠挑 2-3 篇
             # 带摘要的综述强制进种子（HANDOVER_V2 修复 A/B）。旧 0.3 保底
             # 线把 test_9 的 51 篇 0.2 分综述全挡在门外。
-            candidate_ids = {str(paper.get("paper_id")) for paper in candidates}
-            reserved_surveys = [
-                paper
-                for paper in pool
-                if _is_survey(paper)
-                and str((paper.get("bibliography") or {}).get("abstract") or "").strip()
-                and str(paper.get("paper_id")) not in candidate_ids
-                and str(paper.get("paper_id")) not in expanded_ids
-            ]
-            reserved_surveys.sort(
-                key=lambda paper: (-_question_affinity(paper, query), str(paper.get("paper_id")))
-            )
-            reserved_surveys = reserved_surveys[:SURVEY_RESERVE_SLOTS]
-            candidates[:0] = reserved_surveys
-            candidates = candidates[: self.docs_to_expand]
+            if not skip_expand:
+                candidate_ids = {str(paper.get("paper_id")) for paper in candidates}
+                reserved_surveys = [
+                    paper
+                    for paper in pool
+                    if _is_survey(paper)
+                    and str((paper.get("bibliography") or {}).get("abstract") or "").strip()
+                    and str(paper.get("paper_id")) not in candidate_ids
+                    and str(paper.get("paper_id")) not in expanded_ids
+                ]
+                reserved_surveys.sort(
+                    key=lambda paper: (-_question_affinity(paper, query), str(paper.get("paper_id")))
+                )
+                reserved_surveys = reserved_surveys[:SURVEY_RESERVE_SLOTS]
+                candidates[:0] = reserved_surveys
+                candidates = candidates[: self.docs_to_expand]
             citation_calls = 0
             child_records: list[dict[str, Any]] = []
             child_meta: dict[str, dict[str, Any]] = {}

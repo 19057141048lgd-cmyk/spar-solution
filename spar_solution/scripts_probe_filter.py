@@ -21,6 +21,7 @@ from src.spar_baseline.deepseek_layer import DeepSeekClient
 from src.spar_baseline.p2_cli import build_live_pipeline
 from src.spar_baseline.pasa_metrics import keep_letters
 from src.spar_baseline.pool_filter import filter_papers
+from src.spar_baseline.pool_reflect import reflect_on_pool
 from src.spar_baseline.question_understanding import (
     DRAFT_SYSTEM_PROMPT,
     collect_search_queries,
@@ -122,6 +123,21 @@ def main() -> int:
         pool.extend(kept)
         dropped_all.extend(dropped)
         print(f"  第{page}页：新搜到 {len(fresh)}，留下 {len(kept)}，丢掉 {len(dropped)}，池子现在 {len(pool)}")
+
+    course = reflect_on_pool(client, question, understanding, pool)
+    print(f"纠偏: {course.get('verdict')} | {course.get('why')}")
+    if course.get("verdict") in {"wrong_street", "mixed"} and course.get("queries"):
+        print(f"换街搜索词: {course['queries']}")
+        if course.get("field"):
+            understanding = dict(understanding)
+            understanding["field"] = course["field"]
+        extra, errors = _search_page(pipeline.providers, [_sanitize_query(t) for t in course["queries"] if _sanitize_query(t)], 1, seen)
+        searched += len(extra)
+        if extra:
+            kept, dropped = filter_papers(client, understanding, extra)
+            pool.extend(kept)
+            dropped_all.extend(dropped)
+            print(f"  换街后又搜到 {len(extra)}，留下 {len(kept)}，丢掉 {len(dropped)}，池子现在 {len(pool)}")
 
     gold_hits = [
         str((paper.get("bibliography") or {}).get("title") or "")
