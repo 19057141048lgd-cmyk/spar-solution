@@ -35,6 +35,7 @@ ALLOWED = {
     "AutoScholarQuery_test_8",
     "AutoScholarQuery_test_9",
     "AutoScholarQuery_test_15",
+    "AutoScholarQuery_test_88",
 }
 TARGET_POOL = 50
 MAX_PAGES = 3
@@ -74,8 +75,13 @@ def main() -> int:
     if qid not in ALLOWED:
         raise SystemExit(f"本阶段只允许 {sorted(ALLOWED)}")
 
-    rows = {str(row["qid"]): row for row in load_rows(DATASET, offset=0, limit=50)}
-    row = rows[qid]
+    row = None
+    for item in load_rows(DATASET, offset=0, limit=200):
+        if str(item.get("qid")) == qid:
+            row = item
+            break
+    if row is None:
+        raise SystemExit(f"找不到题目 {qid}")
     question = str(row["question"])
     gold = [keep_letters(title) for title in (row.get("answer") or []) if keep_letters(title)]
 
