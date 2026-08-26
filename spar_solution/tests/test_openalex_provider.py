@@ -233,6 +233,36 @@ class OpenAlexProviderTests(unittest.TestCase):
         second = parse_qs(urlsplit(self.calls[1]["url"]).query)
         self.assertEqual(second["filter"], ["openalex_id:W1|W2"])
 
+    def test_relations_references_pages_beyond_fifty(self):
+        """综述深读：超过 50 条引用必须分批拉详情（每批 50）。"""
+
+        work_ids = [f"W{index}" for index in range(1, 81)]
+        provider = OpenAlexProvider(
+            {},
+            transport=self._sequence_transport(
+                (
+                    200,
+                    {
+                        "id": "https://openalex.org/W10",
+                        "referenced_works": [f"https://openalex.org/{item}" for item in work_ids],
+                    },
+                ),
+                (200, {"results": [self._work(item) for item in work_ids[:50]]}),
+                (200, {"results": [self._work(item) for item in work_ids[50:]]}),
+            ),
+        )
+
+        result = provider.relations("W10", relation="references", page_size=80)
+
+        self.assertEqual(result.total, 80)
+        self.assertEqual(result.provenance["api_calls"], 3)
+        first_filter = parse_qs(urlsplit(self.calls[1]["url"]).query)["filter"][0]
+        second_filter = parse_qs(urlsplit(self.calls[2]["url"]).query)["filter"][0]
+        self.assertEqual(first_filter.count("|"), 49)
+        self.assertEqual(second_filter.count("|"), 29)
+        self.assertTrue(first_filter.startswith("openalex_id:W1|"))
+        self.assertTrue(second_filter.startswith("openalex_id:W51|"))
+
     def test_relations_resolves_doi_before_citation_lookup(self):
         provider = OpenAlexProvider(
             {},

@@ -113,9 +113,11 @@ class RelationCountingProvider(FixtureProvider):
     def __init__(self, name, records, relations=None):
         super().__init__(name, records, relations)
         self.relation_targets = []
+        self.relation_page_sizes = []
 
     def relations(self, paper_id, *, relation="all", page_size=10):
         self.relation_targets.append(paper_id)
+        self.relation_page_sizes.append(page_size)
         return super().relations(paper_id, relation=relation, page_size=page_size)
 
 
@@ -582,6 +584,55 @@ class SurveyPriorityTests(unittest.TestCase):
         result = SearchTreeRunner({"arxiv": provider}, max_depth=1, relevance_threshold=0.75).run(QUERY)
         # normal 过阈值、survey 只有 0.4：综述保底名额必须让 survey 先被扩展。
         self.assertEqual(provider.relation_targets[0], survey["paper_id"])
+        # 综述种子必须翻到 ~100 条引用，普通种子仍是 25。
+        self.assertEqual(provider.relation_page_sizes[0], 100)
+
+    def test_survey_reserved_when_judge_score_is_below_old_floor(self):
+        """判分 0.2（旧 0.3 保底线以下）的综述仍必须强制进扩展种子。"""
+
+        survey = _survey()
+        survey["bibliography"]["abstract"] = "Broad overview of heart rate estimation with little else from the question."
+        normal = _fixture_paper(
+            "fixture:normal3",
+            "10.1234/tree.normal3",
+            "WiFi CSI heart rate monitoring system",
+            "WiFi CSI heart rate monitoring system for contactless vital sign estimation.",
+        )
+
+        class ScoreByKindTransport:
+            def __call__(self, method, url, headers, body, timeout):
+                request = json.loads(body)
+                user = json.loads(request["messages"][1]["content"])
+                task = user.get("task")
+                if task == "decompose_query":
+                    content = {"queries": ["wifi csi heart rate monitoring"], "source_capabilities": ["arxiv"]}
+                elif task == "judge_candidates":
+                    content = {"results": [
+                        {
+                            "paper_id": item["paper_id"],
+                            "relevance_score": 0.2 if "survey" in str(item.get("paper_id")) else 0.9,
+                            "relevance_label": "irrelevant" if "survey" in str(item.get("paper_id")) else "relevant",
+                            "hard_constraint_state": "pass",
+                            "reason": "fixture",
+                            "evidence_needed": [],
+                            "confidence": 0.8,
+                        }
+                        for item in user.get("candidates", [])
+                    ]}
+                else:
+                    content = {"results": []}
+                envelope = {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+                return TransportResponse(200, json.dumps(envelope))
+
+        provider = RelationCountingProvider(
+            "arxiv", [normal, survey], {p["paper_id"]: [_child(f"fixture:child-{p['paper_id']}", f"10.1234/c.{p['paper_id']}")] for p in (survey, normal)}
+        )
+        SearchTreeRunner(
+            {"arxiv": provider}, _scripted_layer(ScoreByKindTransport()), max_depth=1, relevance_threshold=0.75
+        ).run(QUERY)
+        self.assertIn(survey["paper_id"], provider.relation_targets[:3])
+        survey_index = provider.relation_targets.index(survey["paper_id"])
+        self.assertEqual(provider.relation_page_sizes[survey_index], 100)
 
     def test_domain_awakening_rephrase_sends_junk_titles(self):
         captured = {}
@@ -683,3 +734,52 @@ class TopNRerankTests(unittest.TestCase):
         self.assertEqual(result["stats"]["rerank_papers"], 0)
         papers = {p["paper_id"]: p for p in result["papers"]}
         self.assertAlmostEqual(papers[_seed()["paper_id"]]["scores"]["relevance"], 0.9)
+
+    def test_rerank_window_covers_rank_36(self):
+        """重排窗口 40：test_8 金标曾排 36，top-30 吃不到。"""
+
+        captured = {}
+
+        class CaptureRerankTransport:
+            def __call__(self, method, url, headers, body, timeout):
+                request = json.loads(body)
+                user = json.loads(request["messages"][1]["content"])
+                task = user.get("task")
+                if task == "rerank_top":
+                    captured["n"] = len(user.get("candidates") or [])
+                    content = {"results": [
+                        {"paper_id": item["paper_id"], "score": 0.5} for item in user.get("candidates") or []
+                    ]}
+                elif task == "decompose_query":
+                    content = {"queries": ["wifi csi heart rate monitoring"], "source_capabilities": ["arxiv"]}
+                else:
+                    content = {"results": [
+                        {
+                            "paper_id": item["paper_id"],
+                            "relevance_score": 0.75,
+                            "relevance_label": "borderline",
+                            "hard_constraint_state": "pass",
+                            "reason": "fixture",
+                            "evidence_needed": [],
+                            "confidence": 0.7,
+                        }
+                        for item in user.get("candidates", [])
+                    ]}
+                envelope = {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+                return TransportResponse(200, json.dumps(envelope))
+
+        papers = [
+            _fixture_paper(
+                f"fixture:rank{index}",
+                f"10.1234/rank.{index}",
+                f"WiFi CSI heart rate paper {index}",
+                "WiFi CSI heart rate monitoring via contactless vital sign estimation.",
+            )
+            for index in range(42)
+        ]
+        runner = SearchTreeRunner({"arxiv": FixtureProvider("arxiv", [])}, _scripted_layer(CaptureRerankTransport()))
+        applied = runner._rerank_top_n(QUERY, [
+            {**paper, "scores": {"relevance": 0.75}, "provenance": {}} for paper in papers
+        ], [])
+        self.assertEqual(captured.get("n"), 40)
+        self.assertEqual(applied, 0)  # 全部 0.5 < 0.9，只升不降所以不改分

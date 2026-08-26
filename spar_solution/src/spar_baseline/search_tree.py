@@ -137,11 +137,36 @@ def _title_matches(candidate_title: str, pick_query: str, *, min_overlap: float 
 # 聚集在综述的参考文献列表里——综述是指路牌，扩展阶段必须优先读它。
 # "review" 有误报（如 peer review 论文），代价只是扩展排序靠前，可接受。
 _SURVEY_TITLE_RE = re.compile(r"\b(survey|surveys|overview|tutorial|review)\b", re.IGNORECASE)
+_WORD_RE = re.compile(r"[\w]+", re.UNICODE)
+# 综述强制深读（HANDOVER_V2 修复 A）：领域相邻综述不问判分，强制占 2-3 个
+# 种子位；引用名单翻到 ~100 条。普通种子仍走 25 条宽腿。
+SURVEY_RESERVE_SLOTS = 3
+SURVEY_REFERENCE_LIMIT = 100
+DEFAULT_REFERENCE_LIMIT = 25
+# 重排窗口（修复 B）：test_8 金标判 0.75 排 36，top-30 够不着。
+RERANK_TOP_N = 40
 
 
 def _is_survey(paper: Mapping[str, Any]) -> bool:
     title = str((paper.get("bibliography") or {}).get("title") or "")
     return bool(_SURVEY_TITLE_RE.search(title))
+
+
+def _question_affinity(paper: Mapping[str, Any], query: str) -> float:
+    """题面词与标题/摘要的重叠率。综述选种用这个，显式不看 LLM 判分。
+
+    判分 prompt 把综述压到 <0.7（题目没要综述时），test_9 的 51 篇综述
+    全被打 0.2，连旧的 0.3 保底线都过不了。综述是地图不是答案。
+    """
+
+    query_tokens = set(_WORD_RE.findall(str(query or "").casefold()))
+    if not query_tokens:
+        return 0.0
+    bib = paper.get("bibliography") or {}
+    paper_tokens = set(
+        _WORD_RE.findall(" ".join(str(bib.get(key) or "") for key in ("title", "abstract")).casefold())
+    )
+    return len(query_tokens & paper_tokens) / len(query_tokens)
 
 
 def _seed_relevance(paper: Mapping[str, Any]) -> float:
@@ -532,11 +557,11 @@ class SearchTreeRunner:
         "Return every given paper_id exactly once. Never invent paper facts."
     )
 
-    def _rerank_top_n(self, query: str, pool: list[dict[str, Any]], errors: list[dict[str, Any]], *, top_n: int = 30) -> int:
+    def _rerank_top_n(self, query: str, pool: list[dict[str, Any]], errors: list[dict[str, Any]], *, top_n: int = RERANK_TOP_N) -> int:
         """终局比较式重排：把前 top_n 篇一起交给 LLM 对比打分，就地更新分数。
 
         失败（无 LLM/预算/解析错误/ID 对不上）直接返回 0，保持原序——重排
-        是增益件不是依赖件。
+        是增益件不是依赖件。窗口 40：test_8 金标曾排 36，top-30 吃不到。
         """
 
         scored = [
@@ -931,18 +956,22 @@ class SearchTreeRunner:
                 ]
                 best_effort.sort(key=lambda paper: (-_seed_relevance(paper), str(paper.get("paper_id"))))
                 candidates = best_effort[:3]
-            # 综述保底名额：池中有带摘要、分数 >=0.3 的综述但没进候选时，
-            # 强制补进前 2 个种子位——哪怕它分数不如普通论文。
+            # 综述保底名额与判分解耦：不问 LLM 分，按题面词重叠挑 2-3 篇
+            # 带摘要的综述强制进种子（HANDOVER_V2 修复 A/B）。旧 0.3 保底
+            # 线把 test_9 的 51 篇 0.2 分综述全挡在门外。
             candidate_ids = {str(paper.get("paper_id")) for paper in candidates}
             reserved_surveys = [
                 paper
                 for paper in pool
                 if _is_survey(paper)
-                and _seed_relevance(paper) >= 0.3
                 and str((paper.get("bibliography") or {}).get("abstract") or "").strip()
                 and str(paper.get("paper_id")) not in candidate_ids
                 and str(paper.get("paper_id")) not in expanded_ids
-            ][:2]
+            ]
+            reserved_surveys.sort(
+                key=lambda paper: (-_question_affinity(paper, query), str(paper.get("paper_id")))
+            )
+            reserved_surveys = reserved_surveys[:SURVEY_RESERVE_SLOTS]
             candidates[:0] = reserved_surveys
             candidates = candidates[: self.docs_to_expand]
             citation_calls = 0
@@ -969,7 +998,8 @@ class SearchTreeRunner:
                     citation_calls += 1
                     relation_calls += 1
                     try:
-                        result = _relation_call(provider, seed_id, "references", max(self.page_size, 25))
+                        ref_limit = SURVEY_REFERENCE_LIMIT if _is_survey(seed) else max(self.page_size, DEFAULT_REFERENCE_LIMIT)
+                        result = _relation_call(provider, seed_id, "references", ref_limit)
                     except Exception as exc:
                         errors.append({"source": source, "code": str(getattr(exc, "code", "unknown")), "message": str(exc)[:200], "stage": f"expand_L{level}", "details": {"paper_id": seed_id}})
                         # arXiv 等来源的 relations 是显式 unsupported 存根：记住它，

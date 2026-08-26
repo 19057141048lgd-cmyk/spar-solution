@@ -442,8 +442,10 @@ class OpenAlexProvider:
         requested = page_size if limit is None else limit
         if not isinstance(requested, int) or isinstance(requested, bool) or requested < 1:
             raise ProviderError(self.source, "config", "relation limit must be a positive integer")
-        effective_limit = min(requested, 50)
-        warnings = ["relation_limit_truncated_to_50"] if requested > 50 else []
+        # 综述强制深读需要 ~100 条引用（HANDOVER_V2 修复 A）。OpenAlex
+        # filter 一次稳妥 50 个 ID，超过则在 _relation_records 内分批。
+        effective_limit = min(requested, 100)
+        warnings = ["relation_limit_truncated_to_100"] if requested > 100 else []
         calls: list[dict[str, Any]] = []
         source_errors: list[dict[str, Any]] = []
 
@@ -576,16 +578,23 @@ class OpenAlexProvider:
         )[:limit]
         if not ids:
             return []
-        batch = self._tracked_request(
-            self._url("/works", {"filter": f"openalex_id:{'|'.join(ids)}", "per_page": len(ids)}),
-            "reference_details",
-            calls,
-        )
-        results = batch.get("results")
-        if not isinstance(results, list):
-            raise ProviderError(self.source, "parse", "response.results must be an array")
-        if any(not isinstance(item, Mapping) for item in results):
-            raise ProviderError(self.source, "parse", "reference results must contain objects")
+        results: list[Mapping[str, Any]] = []
+        # 每批 50：OpenAlex filter=openalex_id:W1|... 单次稳妥上限；综述
+        # 名单常有一两百条，分两批才能读到 ~100。
+        batch_size = 50
+        for offset in range(0, len(ids), batch_size):
+            chunk = ids[offset : offset + batch_size]
+            batch = self._tracked_request(
+                self._url("/works", {"filter": f"openalex_id:{'|'.join(chunk)}", "per_page": len(chunk)}),
+                "reference_details",
+                calls,
+            )
+            page = batch.get("results")
+            if not isinstance(page, list):
+                raise ProviderError(self.source, "parse", "response.results must be an array")
+            if any(not isinstance(item, Mapping) for item in page):
+                raise ProviderError(self.source, "parse", "reference results must contain objects")
+            results.extend(page)
         return results
 
     def _to_paper_doc(
